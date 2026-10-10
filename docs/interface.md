@@ -116,4 +116,7 @@ against its core. It checks the shape of `signer_info` and `signer_accounts`, re
 accounts, jobs and kinds, that a wrong or missing secret signs nothing, that every account signs and
 every signature checks against its public material, and that paths outside an account are refused.
 [`mock::MockSigner`](../src/mock.rs) passes it with no secret, with a password, and waiting for
-confirmation as a device does.
+confirmation as a device does. It can also answer wrong on purpose (`Doctor`): a signature by
+another key, over another digest, or one fewer than asked, so a manager's tests can show it
+refuses each. Its keys can come from another phrase, to stand beside a keystore holding the test
+keys.
