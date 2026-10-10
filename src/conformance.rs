@@ -195,7 +195,7 @@ pub fn psbt_for(account: &Account, inputs: &[(String, String)]) -> (String, Vec<
     use bitcoin::sighash::{EcdsaSighashType, Prevouts, SighashCache, TapSighashType};
     use bitcoin::{
         absolute, transaction, Amount, CompressedPublicKey, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
-        Txid, Witness,
+        Witness,
     };
 
     let secp = Secp256k1::verification_only();
@@ -219,14 +219,32 @@ pub fn psbt_for(account: &Account, inputs: &[(String, String)]) -> (String, Vec<
         });
         keys.push(key);
     }
-    let mut txid = [0u8; 32];
-    OsRng.fill_bytes(&mut txid);
+    // Each coin comes from a transaction of its own, which a native segwit input carries whole, as
+    // wallets send it: a device such as a Ledger warns about an input without it.
+    let mut salt = [0u8; 4];
+    OsRng.fill_bytes(&mut salt);
+    let funding: Vec<Transaction> = prevouts
+        .iter()
+        .enumerate()
+        .map(|(i, prev)| Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::from_consensus(u32::from_be_bytes(salt) % 400_000_000 + i as u32),
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![prev.clone()],
+        })
+        .collect();
     let tx = Transaction {
         version: transaction::Version::TWO,
         lock_time: absolute::LockTime::ZERO,
-        input: (0..inputs.len())
-            .map(|i| TxIn {
-                previous_output: OutPoint::new(Txid::from_byte_array(txid), i as u32),
+        input: funding
+            .iter()
+            .map(|f| TxIn {
+                previous_output: OutPoint::new(f.compute_txid(), 0),
                 script_sig: ScriptBuf::new(),
                 sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
                 witness: Witness::new(),
@@ -243,6 +261,9 @@ pub fn psbt_for(account: &Account, inputs: &[(String, String)]) -> (String, Vec<
     for (i, ((key_path, origin), key)) in inputs.iter().zip(&keys).enumerate() {
         let source = (fingerprint, DerivationPath::from_str(origin).expect("origin path"));
         psbt.inputs[i].witness_utxo = Some(prevouts[i].clone());
+        if account.family == Family::Bitcoin {
+            psbt.inputs[i].non_witness_utxo = Some(funding[i].clone());
+        }
         let (scheme, digest) = if account.family == Family::Bitcoin {
             psbt.inputs[i].bip32_derivation.insert(*key, source);
             let prev = &prevouts[i];
