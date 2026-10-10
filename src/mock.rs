@@ -1,6 +1,7 @@
 //! A signer with software keys behind the interface: an EVM account, a native segwit and a taproot
 //! account from the "test … junk" phrase or another. Optionally it asks for a secret, holds every
 //! job until [`MockSigner::confirm`] the way a device waits for its button, or answers wrong.
+//! Given whole requests, it works out their digests itself, as a device with a screen does.
 
 use std::str::FromStr;
 
@@ -8,6 +9,7 @@ use bip32::{ChildNumber, DerivationPath, Prefix, XPrv};
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::{schnorr, PublicKey};
+use sha3::{Digest, Keccak256};
 
 use crate::jobs::JobTable;
 use crate::verify::{bip86_tweak, evm_address, hex32, relative};
@@ -179,9 +181,7 @@ impl MockSigner {
 
     fn sign_now(&self, request: &SignRequest) -> Result<Vec<Signature>> {
         let held = self.held(&request.account)?;
-        let Payload::Hash { items } = &request.payload else {
-            return Err(SignerError::new(ErrorCode::Unsupported, "the mock signs hashes only"));
-        };
+        let items = items_of(held, &request.payload)?;
         let mut sigs = items
             .iter()
             .enumerate()
@@ -210,6 +210,108 @@ impl Held {
             key,
         }
     }
+}
+
+/// What a request signs, one item per signature: a hash request's own items, or the digests of a
+/// whole request, worked out here from what was handed over.
+fn items_of(held: &Held, payload: &Payload) -> Result<Vec<HashItem>> {
+    let evm = |data: &[u8]| {
+        vec![HashItem {
+            path: None,
+            scheme: Scheme::Evm,
+            digest: hex::encode(Keccak256::digest(data)),
+        }]
+    };
+    match payload {
+        Payload::Hash { items } => Ok(items.clone()),
+        Payload::EvmTransaction { tx, .. } => Ok(evm(&unhex(tx)?)),
+        Payload::EvmMessage { message } => {
+            let bytes = unhex(message)?;
+            let mut data = format!("\x19Ethereum Signed Message:\n{}", bytes.len()).into_bytes();
+            data.extend_from_slice(&bytes);
+            Ok(evm(&data))
+        }
+        Payload::EvmTypedData { .. } => Err(SignerError::new(
+            ErrorCode::Unsupported,
+            "the mock signs typed data as a hash only",
+        )),
+        Payload::BtcPsbt { psbt, .. } => psbt_items(held, psbt),
+    }
+}
+
+fn unhex(s: &str) -> Result<Vec<u8>> {
+    hex::decode(s.trim().trim_start_matches("0x")).map_err(|_| SignerError::new(ErrorCode::Invalid, "not hex"))
+}
+
+/// One item per input: the path the PSBT gives for this signer's key, and the input's sighash.
+fn psbt_items(held: &Held, psbt: &str) -> Result<Vec<HashItem>> {
+    use bitcoin::bip32::{ChildNumber, KeySource};
+    use bitcoin::hashes::Hash;
+    use bitcoin::sighash::{EcdsaSighashType, Prevouts, SighashCache, TapSighashType};
+
+    let invalid = |m: String| SignerError::new(ErrorCode::Invalid, m);
+    let psbt = bitcoin::Psbt::from_str(psbt.trim()).map_err(|e| invalid(format!("psbt: {e}")))?;
+    let mine = held.account.fingerprint.as_deref().unwrap_or_default();
+    let path_of = |(fp, path): &KeySource| {
+        (fp.to_string() == mine).then(|| {
+            let steps: Vec<String> = path
+                .into_iter()
+                .map(|c| match c {
+                    ChildNumber::Normal { index } => index.to_string(),
+                    ChildNumber::Hardened { index } => format!("{index}'"),
+                })
+                .collect();
+            format!("m/{}", steps.join("/"))
+        })
+    };
+    let prevouts = psbt
+        .inputs
+        .iter()
+        .enumerate()
+        .map(|(i, input)| {
+            input
+                .witness_utxo
+                .clone()
+                .ok_or_else(|| invalid(format!("input {i}: no witness utxo")))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut cache = SighashCache::new(&psbt.unsigned_tx);
+    let mut items = Vec::with_capacity(psbt.inputs.len());
+    for (i, input) in psbt.inputs.iter().enumerate() {
+        let not_mine = || invalid(format!("input {i}: no key of this signer"));
+        let (scheme, path, digest) = match held.account.family {
+            Family::Bitcoin => {
+                let path = input.bip32_derivation.values().find_map(path_of).ok_or_else(not_mine)?;
+                let prev = &prevouts[i];
+                let h = cache
+                    .p2wpkh_signature_hash(i, &prev.script_pubkey, prev.value, EcdsaSighashType::All)
+                    .map_err(|e| invalid(format!("input {i}: {e}")))?;
+                (Scheme::Ecdsa, path, h.to_byte_array())
+            }
+            Family::BitcoinTaproot => {
+                let path = input
+                    .tap_key_origins
+                    .values()
+                    .find_map(|(_, source)| path_of(source))
+                    .ok_or_else(not_mine)?;
+                let ty = match input.sighash_type {
+                    Some(t) => t.taproot_hash_ty().map_err(|e| invalid(format!("input {i}: {e}")))?,
+                    None => TapSighashType::Default,
+                };
+                let h = cache
+                    .taproot_key_spend_signature_hash(i, &Prevouts::All(&prevouts), ty)
+                    .map_err(|e| invalid(format!("input {i}: {e}")))?;
+                (Scheme::Bip86, path, h.to_byte_array())
+            }
+            Family::Evm => return Err(SignerError::new(ErrorCode::Unsupported, "a PSBT for an EVM account")),
+        };
+        items.push(HashItem {
+            path: Some(path),
+            scheme,
+            digest: hex::encode(digest),
+        });
+    }
+    Ok(items)
 }
 
 /// The same item over a digest with its last bit flipped.
