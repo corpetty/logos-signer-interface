@@ -62,7 +62,7 @@ Starts signing and returns a job at once, because a person at a device may take 
 | Kind | Fields | Signed by |
 |---|---|---|
 | `hash` | `items: [{ path?, scheme, digest }]` | signers without a screen: the keystore, a bare Keycard |
-| `evm_transaction` | `chainId`, `tx`: unsigned EIP-2718 bytes, hex | devices with a screen |
+| `evm_transaction` | `chainId`, `tx`: unsigned EIP-2718 bytes, hex, whose keccak-256 is the signing hash (a legacy transaction in its EIP-155 form) | devices with a screen |
 | `evm_message` | `message`: the bytes `personal_sign` covers, hex | devices with a screen |
 | `evm_typed_data` | `typedData`: the EIP-712 document | devices with a screen |
 | `btc_psbt` | `network`, `psbt`: base64, version 0 | devices with a screen |
@@ -88,6 +88,10 @@ else is refused with `invalid`. An EVM item has no `path`.
 ```json
 { "item": 0, "signature": "<64 bytes hex>", "recoveryId": 1, "pubkey": "<33 bytes hex, or 32 x-only>" }
 ```
+
+An answer to `evm_transaction`, `evm_message` or `evm_typed_data` is one signature with its
+`recoveryId`. An answer to `btc_psbt` is one signature per input, and `item` is the input's index;
+the signer refuses a PSBT whose inputs it would sign at a path outside the account.
 
 Repeats until the job is swept, ten minutes after it settles. A job still running answers `busy`;
 a refused or failed job answers its error.
@@ -115,8 +119,10 @@ Every signer module runs [`conformance::run`](../src/conformance.rs) in its own 
 against its core. It checks the shape of `signer_info` and `signer_accounts`, refusals of unknown
 accounts, jobs and kinds, that a wrong or missing secret signs nothing, that every account signs and
 every signature checks against its public material, and that paths outside an account are refused.
-[`mock::MockSigner`](../src/mock.rs) passes it with no secret, with a password, and waiting for
-confirmation as a device does. It can also answer wrong on purpose (`Doctor`): a signature by
+A signer that takes whole requests gets them instead of hashes: a transaction or a message for an
+EVM account and a PSBT for a Bitcoin one, the suite working out each digest itself.
+[`mock::MockSigner`](../src/mock.rs) passes it with no secret, with a password, waiting for
+confirmation as a device does, and taking whole requests as a device with a screen does. It can also answer wrong on purpose (`Doctor`): a signature by
 another key, over another digest, or one fewer than asked, so a manager's tests can show it
 refuses each. Its keys can come from another phrase, to stand beside a keystore holding the test
 keys.

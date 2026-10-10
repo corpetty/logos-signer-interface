@@ -23,13 +23,15 @@ bip32 = { version = "0.5", default-features = false, features = ["secp256k1", "s
 # BIP39 seeds for the mock; bip32's own mnemonic type takes 24 words only.
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
+# The mock reads a whole PSBT the way a device does.
+bitcoin = { version = "0.32", optional = true, default-features = false, features = ["std", "base64"] }
 
 [features]
 default = []
 # MockSigner: software keys behind the interface, for tests here and in consumers.
-mock = []
+mock = ["dep:bitcoin"]
 # The suite every signer runs in its own CI.
-conformance = []
+conformance = ["dep:bitcoin"]
 
 [dev-dependencies]
 logos-signer-interface = { path = ".", features = ["mock", "conformance"] }

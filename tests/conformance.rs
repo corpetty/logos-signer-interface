@@ -50,6 +50,47 @@ fn a_signer_that_waits_for_its_device_passes() {
 }
 
 #[test]
+fn a_device_that_signs_whole_requests_passes() {
+    for kinds in [
+        vec![RequestKind::EvmTransaction, RequestKind::BtcPsbt],
+        vec![RequestKind::EvmMessage, RequestKind::BtcPsbt],
+    ] {
+        let mut s = MockSigner::new(MockOptions {
+            needs_confirmation: true,
+            request_kinds: kinds,
+            ..Default::default()
+        });
+        conformance::run(
+            &mut s,
+            &Fixture {
+                secret: None,
+                wrong_secret: None,
+            },
+            &mut |s, job| s.confirm(job).unwrap(),
+        );
+    }
+}
+
+#[test]
+fn the_suites_transaction_is_canonical_rlp() {
+    // Worked by hand in EIP-1559's field order: a 47-byte list after the type byte.
+    let want = [
+        "02ef",                                       // type 2, list of 47 bytes
+        "01",                                         // chain id 1
+        "07",                                         // nonce 7
+        "843b9aca00",                                 // priority fee, 1 gwei
+        "8506fc23ac00",                               // max fee, 30 gwei
+        "825208",                                     // gas 21000
+        "94dddddddddddddddddddddddddddddddddddddddd", // to
+        "87038d7ea4c68000",                           // 0.001 ether
+        "80",                                         // no data
+        "c0",                                         // no access list
+    ]
+    .concat();
+    assert_eq!(hex::encode(conformance::eip1559(7)), want);
+}
+
+#[test]
 fn a_refusal_on_the_device_is_a_refused_job_with_no_signatures() {
     let mut s = MockSigner::new(MockOptions {
         needs_confirmation: true,

@@ -1,14 +1,20 @@
 //! The suite every signer module runs in its own CI. It drives a [`Signer`] in process and checks
-//! every answer with [`crate::verify`], against the account's public material only.
+//! every answer with [`crate::verify`], against the account's public material only. A signer that
+//! takes whole requests gets them: a transaction or a message for an EVM account, a PSBT for a
+//! Bitcoin one, each digest worked out here.
 //!
 //! ```ignore
 //! let fixture = Fixture { secret: Some(Secret::new("pw")), wrong_secret: Some(Secret::new("no")) };
 //! conformance::run(&mut my_signer, &fixture, &mut |_, _| {});
 //! ```
 
-use rand_core::{OsRng, RngCore};
+use std::str::FromStr;
 
-use crate::verify::check;
+use k256::elliptic_curve::sec1::ToEncodedPoint;
+use rand_core::{OsRng, RngCore};
+use sha3::{Digest, Keccak256};
+
+use crate::verify::{check, derive};
 use crate::wire::*;
 use crate::{Signer, INTERFACE};
 
@@ -60,6 +66,227 @@ fn request(account: &Account, items: Vec<HashItem>, secret: Option<Secret>) -> S
         payload: Payload::Hash { items },
         secret,
     }
+}
+
+/// A request in a kind the signer takes, and the items its answer must sign.
+pub fn request_for(info: &SignerInfo, account: &Account, secret: Option<Secret>) -> (SignRequest, Vec<HashItem>) {
+    let takes = |k| info.request_kinds.contains(&k);
+    let (payload, items) = if takes(RequestKind::Hash) {
+        let items = items_for(account);
+        (Payload::Hash { items: items.clone() }, items)
+    } else if account.family == Family::Evm && takes(RequestKind::EvmTransaction) {
+        let tx = eip1559(OsRng.next_u32().into());
+        let item = evm_item(&tx);
+        (
+            Payload::EvmTransaction {
+                chain_id: 1,
+                tx: hex::encode(tx),
+            },
+            vec![item],
+        )
+    } else if account.family == Family::Evm && takes(RequestKind::EvmMessage) {
+        let text = format!("conformance {}", random_digest());
+        let item = evm_item(format!("\x19Ethereum Signed Message:\n{}{text}", text.len()).as_bytes());
+        (
+            Payload::EvmMessage {
+                message: hex::encode(text),
+            },
+            vec![item],
+        )
+    } else if account.family.is_bitcoin() && takes(RequestKind::BtcPsbt) {
+        let base = account.path.clone().unwrap_or_default();
+        let paths: Vec<(String, String)> = ["0/0", "1/3"]
+            .into_iter()
+            .map(|tail| (format!("{base}/{tail}"), format!("{base}/{tail}")))
+            .collect();
+        let (psbt, items) = psbt_for(account, &paths);
+        let network = if account.chain == Some(Chain::Main) {
+            "bitcoin"
+        } else {
+            "testnet"
+        };
+        (
+            Payload::BtcPsbt {
+                network: network.into(),
+                psbt,
+            },
+            items,
+        )
+    } else {
+        panic!(
+            "{}: no request kind the suite can build for a {:?} account",
+            account.id, account.family
+        );
+    };
+    (
+        SignRequest {
+            account: account.id.clone(),
+            payload,
+            secret,
+        },
+        items,
+    )
+}
+
+fn evm_item(data: &[u8]) -> HashItem {
+    HashItem {
+        path: None,
+        scheme: Scheme::Evm,
+        digest: hex::encode(Keccak256::digest(data)),
+    }
+}
+
+/// An unsigned EIP-1559 transfer on chain 1: the bytes whose keccak-256 is its signing hash.
+pub fn eip1559(nonce: u64) -> Vec<u8> {
+    let to = [0xdd; 20];
+    let fields = [
+        rlp_uint(1),
+        rlp_uint(nonce),
+        rlp_uint(1_000_000_000),
+        rlp_uint(30_000_000_000),
+        rlp_uint(21_000),
+        rlp_bytes(&to),
+        rlp_uint(1_000_000_000_000_000),
+        rlp_bytes(&[]),
+        rlp_list(&[]),
+    ];
+    let mut tx = vec![0x02];
+    tx.extend(rlp_list(&fields));
+    tx
+}
+
+fn rlp_len(offset: u8, len: usize) -> Vec<u8> {
+    if len < 56 {
+        return vec![offset + len as u8];
+    }
+    let be: Vec<u8> = len.to_be_bytes().into_iter().skip_while(|b| *b == 0).collect();
+    let mut out = vec![offset + 55 + be.len() as u8];
+    out.extend(be);
+    out
+}
+
+fn rlp_bytes(b: &[u8]) -> Vec<u8> {
+    if b.len() == 1 && b[0] < 0x80 {
+        return b.to_vec();
+    }
+    let mut out = rlp_len(0x80, b.len());
+    out.extend_from_slice(b);
+    out
+}
+
+fn rlp_uint(n: u64) -> Vec<u8> {
+    let be: Vec<u8> = n.to_be_bytes().into_iter().skip_while(|b| *b == 0).collect();
+    rlp_bytes(&be)
+}
+
+fn rlp_list(items: &[Vec<u8>]) -> Vec<u8> {
+    let payload = items.concat();
+    let mut out = rlp_len(0xc0, payload.len());
+    out.extend(payload);
+    out
+}
+
+/// A PSBT with one input per `(key path, origin path)`: it spends the account's key at the first
+/// path and names the second as its origin. Returns it in base64, with one item per input.
+pub fn psbt_for(account: &Account, inputs: &[(String, String)]) -> (String, Vec<HashItem>) {
+    use bitcoin::bip32::{DerivationPath, Fingerprint};
+    use bitcoin::hashes::Hash;
+    use bitcoin::secp256k1::{PublicKey, Secp256k1};
+    use bitcoin::sighash::{EcdsaSighashType, Prevouts, SighashCache, TapSighashType};
+    use bitcoin::{
+        absolute, transaction, Amount, CompressedPublicKey, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
+        Witness,
+    };
+
+    let secp = Secp256k1::verification_only();
+    let (xpub, base) = (
+        account.xpub.as_deref().unwrap_or_default(),
+        account.path.as_deref().unwrap_or_default(),
+    );
+    let fingerprint = Fingerprint::from_str(account.fingerprint.as_deref().unwrap_or_default()).expect("fingerprint");
+    let mut prevouts = Vec::new();
+    let mut keys = Vec::new();
+    for (key_path, _) in inputs {
+        let k = derive(xpub, base, key_path).expect("a key below the account");
+        let key = PublicKey::from_slice(k.to_encoded_point(true).as_bytes()).expect("key");
+        let script_pubkey = match account.family {
+            Family::Bitcoin => ScriptBuf::new_p2wpkh(&CompressedPublicKey(key).wpubkey_hash()),
+            _ => ScriptBuf::new_p2tr(&secp, key.x_only_public_key().0, None),
+        };
+        prevouts.push(TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey,
+        });
+        keys.push(key);
+    }
+    // Each coin comes from a transaction of its own, which a native segwit input carries whole, as
+    // wallets send it: a device such as a Ledger warns about an input without it.
+    let mut salt = [0u8; 4];
+    OsRng.fill_bytes(&mut salt);
+    let funding: Vec<Transaction> = prevouts
+        .iter()
+        .enumerate()
+        .map(|(i, prev)| Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::from_consensus(u32::from_be_bytes(salt) % 400_000_000 + i as u32),
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![prev.clone()],
+        })
+        .collect();
+    let tx = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: funding
+            .iter()
+            .map(|f| TxIn {
+                previous_output: OutPoint::new(f.compute_txid(), 0),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            })
+            .collect(),
+        output: vec![TxOut {
+            value: Amount::from_sat(40_000 * inputs.len() as u64),
+            script_pubkey: prevouts[0].script_pubkey.clone(),
+        }],
+    };
+    let mut psbt = bitcoin::Psbt::from_unsigned_tx(tx).expect("an unsigned transaction");
+    let mut cache = SighashCache::new(&psbt.unsigned_tx);
+    let mut items = Vec::new();
+    for (i, ((key_path, origin), key)) in inputs.iter().zip(&keys).enumerate() {
+        let source = (fingerprint, DerivationPath::from_str(origin).expect("origin path"));
+        psbt.inputs[i].witness_utxo = Some(prevouts[i].clone());
+        if account.family == Family::Bitcoin {
+            psbt.inputs[i].non_witness_utxo = Some(funding[i].clone());
+        }
+        let (scheme, digest) = if account.family == Family::Bitcoin {
+            psbt.inputs[i].bip32_derivation.insert(*key, source);
+            let prev = &prevouts[i];
+            let h = cache
+                .p2wpkh_signature_hash(i, &prev.script_pubkey, prev.value, EcdsaSighashType::All)
+                .expect("sighash");
+            (Scheme::Ecdsa, h.to_byte_array())
+        } else {
+            psbt.inputs[i]
+                .tap_key_origins
+                .insert(key.x_only_public_key().0, (vec![], source));
+            let h = cache
+                .taproot_key_spend_signature_hash(i, &Prevouts::All(&prevouts), TapSighashType::Default)
+                .expect("sighash");
+            (Scheme::Bip86, h.to_byte_array())
+        };
+        items.push(HashItem {
+            path: Some(key_path.clone()),
+            scheme,
+            digest: hex::encode(digest),
+        });
+    }
+    (psbt.to_string(), items)
 }
 
 /// Run a job to its end, driving the device while it waits.
@@ -134,9 +361,14 @@ pub fn unknown_accounts_and_jobs_are_refused<S: Signer>(s: &mut S, fx: &Fixture)
         label: None,
         available: true,
     };
-    let e = s
-        .sign(request(&ghost, items_for(&ghost), fx.secret.clone()))
-        .unwrap_err();
+    let info = s.info();
+    let real = s.accounts().expect("accounts");
+    let mut r = match real.first() {
+        Some(a) => request_for(&info, a, fx.secret.clone()).0,
+        None => request(&ghost, items_for(&ghost), fx.secret.clone()),
+    };
+    r.account = ghost.id.clone();
+    let e = s.sign(r).unwrap_err();
     assert_eq!(e.code, ErrorCode::UnknownAccount);
     assert_eq!(s.status("job_unknown").unwrap_err().code, ErrorCode::UnknownJob);
     assert_eq!(s.result("job_unknown").unwrap_err().code, ErrorCode::UnknownJob);
@@ -152,29 +384,37 @@ pub fn kinds_it_does_not_sign_are_refused<S: Signer>(s: &mut S, fx: &Fixture) {
     else {
         return;
     };
-    if info.request_kinds.contains(&RequestKind::EvmMessage) {
-        return;
+    if !info.request_kinds.contains(&RequestKind::EvmMessage) {
+        let r = SignRequest {
+            account: account.id.clone(),
+            payload: Payload::EvmMessage {
+                message: hex::encode("hello"),
+            },
+            secret: fx.secret.clone(),
+        };
+        assert_eq!(s.sign(r).unwrap_err().code, ErrorCode::Unsupported);
     }
-    let r = SignRequest {
-        account: account.id.clone(),
-        payload: Payload::EvmMessage {
-            message: hex::encode("hello"),
-        },
-        secret: fx.secret.clone(),
-    };
-    assert_eq!(s.sign(r).unwrap_err().code, ErrorCode::Unsupported);
+    if !info.request_kinds.contains(&RequestKind::Hash) {
+        let r = request(&account, items_for(&account), fx.secret.clone());
+        assert_eq!(
+            s.sign(r).unwrap_err().code,
+            ErrorCode::Unsupported,
+            "a device that shows requests signs no bare hash"
+        );
+    }
 }
 
 pub fn a_wrong_or_missing_secret_signs_nothing<S: Signer>(s: &mut S, fx: &Fixture, drive: &mut Drive<'_, S>) {
     if s.info().collects == Collects::Nothing {
         return;
     }
+    let info = s.info();
     let account = s.accounts().expect("accounts").remove(0);
     for (secret, code) in [
         (fx.wrong_secret.clone(), ErrorCode::WrongSecret),
         (None, ErrorCode::Locked),
     ] {
-        let refused = match s.sign(request(&account, items_for(&account), secret)) {
+        let refused = match s.sign(request_for(&info, &account, secret).0) {
             Err(e) => e,
             Ok(job) => {
                 let st = settle(s, &job, drive);
@@ -187,11 +427,10 @@ pub fn a_wrong_or_missing_secret_signs_nothing<S: Signer>(s: &mut S, fx: &Fixtur
 }
 
 pub fn every_account_signs_and_every_signature_checks<S: Signer>(s: &mut S, fx: &Fixture, drive: &mut Drive<'_, S>) {
+    let info = s.info();
     for account in s.accounts().expect("accounts") {
-        let items = items_for(&account);
-        let job = s
-            .sign(request(&account, items.clone(), fx.secret.clone()))
-            .expect("sign");
+        let (r, items) = request_for(&info, &account, fx.secret.clone());
+        let job = s.sign(r).expect("sign");
         let st = settle(s, &job, drive);
         assert_eq!(st.state, JobState::Done, "{}: {:?}", account.id, st.error);
         let sigs = s.result(&job).expect("result");
@@ -212,9 +451,24 @@ pub fn paths_outside_an_account_are_refused<S: Signer>(s: &mut S, fx: &Fixture, 
         .into_iter()
         .filter(|a| a.family.is_bitcoin())
     {
-        let mut items = items_for(&account);
-        items[0].path = Some("m/84'/1'/99'/0/0".into());
-        let refused = match s.sign(request(&account, items, fx.secret.clone())) {
+        let outside = "m/84'/1'/99'/0/0".to_string();
+        let r = if s.info().request_kinds.contains(&RequestKind::Hash) {
+            let mut items = items_for(&account);
+            items[0].path = Some(outside);
+            request(&account, items, fx.secret.clone())
+        } else {
+            let base = account.path.clone().unwrap_or_default();
+            let (psbt, _) = psbt_for(&account, &[(format!("{base}/0/0"), outside)]);
+            SignRequest {
+                account: account.id.clone(),
+                payload: Payload::BtcPsbt {
+                    network: "testnet".into(),
+                    psbt,
+                },
+                secret: fx.secret.clone(),
+            }
+        };
+        let refused = match s.sign(r) {
             Err(e) => e,
             Ok(job) => settle(s, &job, drive).error.expect("signed outside the account"),
         };
