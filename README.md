@@ -14,7 +14,7 @@ wallet.
   - `jobs`: job bookkeeping a signer module can reuse.
   - `json`: builds a module's replies from a `Signer` and reads them back.
   - `conformance` (feature): the suite every signer runs in its own CI.
-  - `mock` (feature): a software signer for tests.
+  - `mock` (feature): a software signer for tests. It can wait for a device's confirmation, or answer wrong on purpose.
 
 ```toml
 logos-signer-interface = { git = "https://github.com/logos-co/logos-signer-interface", rev = "…" }

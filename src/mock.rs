@@ -1,10 +1,10 @@
 //! A signer with software keys behind the interface: an EVM account, a native segwit and a taproot
-//! account from the "test … junk" phrase. Optionally it asks for a secret, or holds every job until
-//! [`MockSigner::confirm`], the way a device waits for its button.
+//! account from the "test … junk" phrase or another. Optionally it asks for a secret, holds every
+//! job until [`MockSigner::confirm`] the way a device waits for its button, or answers wrong.
 
 use std::str::FromStr;
 
-use bip32::{DerivationPath, Prefix, XPrv};
+use bip32::{ChildNumber, DerivationPath, Prefix, XPrv};
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::{schnorr, PublicKey};
@@ -16,6 +16,31 @@ use crate::{Signer, INTERFACE};
 
 pub const PHRASE: &str = "test test test test test test test test test test test junk";
 
+/// How a mock answers: rightly, or wrong in one of the ways the manager must refuse.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Doctor {
+    #[default]
+    None,
+    /// A valid signature, by another key.
+    OtherKey,
+    /// A valid signature, over another digest.
+    OtherDigest,
+    /// One signature fewer than the items asked for.
+    DropLast,
+}
+
+impl Doctor {
+    pub fn parse(s: &str) -> Option<Doctor> {
+        Some(match s {
+            "none" => Doctor::None,
+            "other_key" => Doctor::OtherKey,
+            "other_digest" => Doctor::OtherDigest,
+            "drop_last" => Doctor::DropLast,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct MockOptions {
     pub collects: Collects,
@@ -24,6 +49,9 @@ pub struct MockOptions {
     /// Jobs wait in `confirm_on_device` until confirmed or refused.
     pub needs_confirmation: bool,
     pub request_kinds: Vec<RequestKind>,
+    /// The words its keys come from; another phrase keeps it apart from a keystore's test keys.
+    pub phrase: String,
+    pub doctor: Doctor,
 }
 
 impl Default for MockOptions {
@@ -33,6 +61,8 @@ impl Default for MockOptions {
             secret: String::new(),
             needs_confirmation: false,
             request_kinds: vec![RequestKind::Hash],
+            phrase: PHRASE.into(),
+            doctor: Doctor::None,
         }
     }
 }
@@ -56,7 +86,7 @@ fn fingerprint(master: &XPrv) -> String {
 impl MockSigner {
     pub fn new(opts: MockOptions) -> Self {
         let mut seed = [0u8; 64];
-        pbkdf2::pbkdf2_hmac::<sha2::Sha512>(PHRASE.as_bytes(), b"mnemonic", 2048, &mut seed);
+        pbkdf2::pbkdf2_hmac::<sha2::Sha512>(opts.phrase.as_bytes(), b"mnemonic", 2048, &mut seed);
         let master = XPrv::new(seed).expect("master");
         let fp = fingerprint(&master);
         let derive = |p: &str| XPrv::derive_from_path(seed, &DerivationPath::from_str(p).unwrap()).unwrap();
@@ -105,6 +135,23 @@ impl MockSigner {
         }
     }
 
+    /// Answer wrong from now on, or rightly again.
+    pub fn set_doctor(&mut self, doctor: Doctor) {
+        self.opts.doctor = doctor;
+    }
+
+    /// The "device" is plugged in or not: its accounts stay listed, available or not.
+    pub fn set_available(&mut self, available: bool) {
+        for h in &mut self.accounts {
+            h.account.available = available;
+        }
+    }
+
+    /// Jobs waiting for the person, with what each asks to sign.
+    pub fn waiting(&self) -> Vec<(String, SignRequest)> {
+        self.waiting.clone()
+    }
+
     /// The person confirms on the "device".
     pub fn confirm(&mut self, job: &str) -> Result<()> {
         let at = self.waiting.iter().position(|(j, _)| j == job);
@@ -135,11 +182,45 @@ impl MockSigner {
         let Payload::Hash { items } = &request.payload else {
             return Err(SignerError::new(ErrorCode::Unsupported, "the mock signs hashes only"));
         };
-        items
+        let mut sigs = items
             .iter()
             .enumerate()
-            .map(|(i, item)| sign_item(held, i, item))
-            .collect()
+            .map(|(i, item)| match self.opts.doctor {
+                Doctor::OtherKey => sign_item(&held.other(), i, item),
+                Doctor::OtherDigest => sign_item(held, i, &other_digest(item)),
+                _ => sign_item(held, i, item),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if self.opts.doctor == Doctor::DropLast {
+            sigs.pop();
+        }
+        Ok(sigs)
+    }
+}
+
+impl Held {
+    /// The same account, keyed by one of its own children: a key it does not hold.
+    fn other(&self) -> Held {
+        let key = self
+            .key
+            .derive_child(ChildNumber::new(7, false).expect("child 7"))
+            .expect("child key");
+        Held {
+            account: self.account.clone(),
+            key,
+        }
+    }
+}
+
+/// The same item over a digest with its last bit flipped.
+fn other_digest(item: &HashItem) -> HashItem {
+    let mut bytes = hex::decode(&item.digest).unwrap_or_default();
+    if let Some(last) = bytes.last_mut() {
+        *last ^= 1;
+    }
+    HashItem {
+        digest: hex::encode(bytes),
+        ..item.clone()
     }
 }
 
