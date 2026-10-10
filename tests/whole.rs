@@ -263,3 +263,24 @@ fn what_it_takes_can_change_while_it_runs() {
     assert_eq!(s.info().request_kinds, WHOLE.to_vec());
     assert_eq!(sign(&mut s, &accounts[0], message()).unwrap().len(), 1);
 }
+
+#[test]
+fn a_taproot_input_names_its_internal_key() {
+    let mut m = MockSigner::new(MockOptions::default());
+    let account = m
+        .accounts()
+        .unwrap()
+        .into_iter()
+        .find(|a| a.family == Family::BitcoinTaproot)
+        .unwrap();
+    let base = account.path.clone().unwrap();
+    let path = format!("{base}/0/0");
+    let (psbt, _) = conformance::psbt_for(&account, &[(path.clone(), path)]);
+    let psbt = bitcoin::Psbt::from_str(&psbt).unwrap();
+    let origin = psbt.inputs[0].tap_key_origins.keys().next().copied();
+    assert!(origin.is_some());
+    assert_eq!(
+        psbt.inputs[0].tap_internal_key, origin,
+        "as wallets write a key-path spend"
+    );
+}
