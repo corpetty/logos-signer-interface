@@ -13,14 +13,25 @@ fn items_for(account: &Account) -> Vec<HashItem> {
         Family::BitcoinTaproot => (Scheme::Bip86, Some(format!("{}/0/1", account.path.as_deref().unwrap()))),
     };
     vec![
-        HashItem { path: path.clone(), scheme, digest: "11".repeat(32) },
-        HashItem { path, scheme, digest: "22".repeat(32) },
+        HashItem {
+            path: path.clone(),
+            scheme,
+            digest: "11".repeat(32),
+        },
+        HashItem {
+            path,
+            scheme,
+            digest: "22".repeat(32),
+        },
     ]
 }
 
 /// Every account's answer under `doctor`: `(account, items, signatures)`.
 fn answers(doctor: Doctor) -> Vec<(Account, Vec<HashItem>, Vec<Signature>)> {
-    let mut s = MockSigner::new(MockOptions { doctor, ..Default::default() });
+    let mut s = MockSigner::new(MockOptions {
+        doctor,
+        ..Default::default()
+    });
     s.accounts()
         .unwrap()
         .into_iter()
@@ -52,7 +63,11 @@ fn the_right_answer_passes_the_checks() {
 fn a_signature_by_another_key_is_refused() {
     for (account, items, sigs) in answers(Doctor::OtherKey) {
         for (item, sig) in items.iter().zip(&sigs) {
-            assert!(check(&account, item, sig).is_err(), "{} took another key's signature", account.id);
+            assert!(
+                check(&account, item, sig).is_err(),
+                "{} took another key's signature",
+                account.id
+            );
         }
     }
 }
@@ -61,7 +76,11 @@ fn a_signature_by_another_key_is_refused() {
 fn a_signature_over_another_digest_is_refused() {
     for (account, items, sigs) in answers(Doctor::OtherDigest) {
         for (item, sig) in items.iter().zip(&sigs) {
-            assert!(check(&account, item, sig).is_err(), "{} took a signature over another digest", account.id);
+            assert!(
+                check(&account, item, sig).is_err(),
+                "{} took a signature over another digest",
+                account.id
+            );
         }
     }
 }

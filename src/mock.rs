@@ -201,8 +201,14 @@ impl MockSigner {
 impl Held {
     /// The same account, keyed by one of its own children: a key it does not hold.
     fn other(&self) -> Held {
-        let key = self.key.derive_child(ChildNumber::new(7, false).expect("child 7")).expect("child key");
-        Held { account: self.account.clone(), key }
+        let key = self
+            .key
+            .derive_child(ChildNumber::new(7, false).expect("child 7"))
+            .expect("child key");
+        Held {
+            account: self.account.clone(),
+            key,
+        }
     }
 }
 
@@ -212,7 +218,10 @@ fn other_digest(item: &HashItem) -> HashItem {
     if let Some(last) = bytes.last_mut() {
         *last ^= 1;
     }
-    HashItem { digest: hex::encode(bytes), ..item.clone() }
+    HashItem {
+        digest: hex::encode(bytes),
+        ..item.clone()
+    }
 }
 
 fn sign_item(held: &Held, index: usize, item: &HashItem) -> Result<Signature> {
