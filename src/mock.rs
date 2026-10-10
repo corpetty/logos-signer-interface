@@ -142,6 +142,11 @@ impl MockSigner {
         self.opts.doctor = doctor;
     }
 
+    /// What it takes from now on: hashes, or whole requests as a device with a screen does.
+    pub fn set_request_kinds(&mut self, kinds: Vec<RequestKind>) {
+        self.opts.request_kinds = kinds;
+    }
+
     /// The "device" is plugged in or not: its accounts stay listed, available or not.
     pub fn set_available(&mut self, available: bool) {
         for h in &mut self.accounts {

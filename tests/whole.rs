@@ -247,3 +247,19 @@ fn a_hash_request_is_unsupported_by_a_whole_request_signer() {
     .unwrap_err();
     assert_eq!(e.code, ErrorCode::Unsupported);
 }
+
+#[test]
+fn what_it_takes_can_change_while_it_runs() {
+    let mut s = MockSigner::new(MockOptions::default());
+    let accounts = s.accounts().unwrap();
+    let message = || Payload::EvmMessage {
+        message: hex::encode("now whole"),
+    };
+    assert_eq!(
+        sign(&mut s, &accounts[0], message()).unwrap_err().code,
+        ErrorCode::Unsupported
+    );
+    s.set_request_kinds(WHOLE.to_vec());
+    assert_eq!(s.info().request_kinds, WHOLE.to_vec());
+    assert_eq!(sign(&mut s, &accounts[0], message()).unwrap().len(), 1);
+}
