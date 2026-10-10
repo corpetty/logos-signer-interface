@@ -272,6 +272,8 @@ pub fn psbt_for(account: &Account, inputs: &[(String, String)]) -> (String, Vec<
                 .expect("sighash");
             (Scheme::Ecdsa, h.to_byte_array())
         } else {
+            // A key-path spend names its internal key, as wallets write it; the Keycard Shell requires it.
+            psbt.inputs[i].tap_internal_key = Some(key.x_only_public_key().0);
             psbt.inputs[i]
                 .tap_key_origins
                 .insert(key.x_only_public_key().0, (vec![], source));
