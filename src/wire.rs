@@ -49,7 +49,7 @@ pub enum Collects {
 #[serde(rename_all = "camelCase")]
 pub struct SignerInfo {
     pub interface: String,
-    /// `keystore`, `keycard`, `keycard_shell`, `ledger`, `trezor`, `mock`.
+    /// `keystore`, `keycard`, `keycard_shell`, `ledger`, `trezor`, `qr`, `mock`.
     pub kind: String,
     #[serde(default)]
     pub model: String,
@@ -71,7 +71,8 @@ pub struct Account {
     /// The account's own path; Bitcoin items sign below it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    /// Master fingerprint, 8 hex digits.
+    /// Master fingerprint, 8 hex digits: the wallet the account derives from. A Bitcoin account
+    /// always carries it; an EVM account should whenever the signer knows its seed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

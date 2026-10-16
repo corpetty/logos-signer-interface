@@ -32,7 +32,7 @@ Every reply is `{ "ok": true, … }` or `{ "ok": false, "code": <code>, "error":
 | Field | Meaning |
 |---|---|
 | `interface` | `"logos.signer/1"` |
-| `kind` | `keystore`, `keycard`, `keycard_shell`, `ledger`, `trezor`, `mock` |
+| `kind` | `keystore`, `keycard`, `keycard_shell`, `ledger`, `trezor`, `qr`, `mock` |
 | `families` | Any of `evm`, `bitcoin` (native segwit, BIP84), `bitcoin_taproot` (key path, BIP86) |
 | `requestKinds` | Any of `hash`, `evm_transaction`, `evm_message`, `evm_typed_data`, `btc_psbt` |
 | `showsRequest` | The device shows the request on its own screen |
@@ -48,6 +48,23 @@ Every reply is `{ "ok": true, … }` or `{ "ok": false, "code": <code>, "error":
 An EVM account carries `address` instead of `xpub`, and signs with its own key. A Bitcoin account
 carries its account path, master fingerprint and account xpub, and signs below its path. A device
 module keeps listing an unplugged device's accounts with `"available": false`.
+
+`fingerprint` names the wallet an account derives from, so apps can show it beside the account. An
+EVM account should carry it too whenever the signer knows the account's seed; an imported key has
+none. The same account may be offered by several signers, a keystore and a hardware wallet holding
+one phrase for instance: an EVM account is the same account wherever its address is, a Bitcoin one
+wherever its account key is.
+
+A signer may add `origin` to an account, for apps:
+
+```json
+"origin": { "devices": [ { "kind": "keycard", "id": "…", "name": "Work card" } ],
+            "phrase": { "id": "…", "name": "Main phrase" }, "kind": "derived", "path": "m/44'/60'/0'/0/0" }
+```
+
+`devices` are the devices that hold it, `phrase` the wallet in the signer's own words, with the name
+the person gave it, `kind` `derived` or `imported`. All of it is optional, and none of it is checked:
+`fingerprint` is what matches a wallet across signers.
 
 ### `sign(request_json) → { ok, job }`
 
