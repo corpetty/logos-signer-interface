@@ -32,6 +32,8 @@ default = []
 mock = ["dep:bitcoin"]
 # The suite every signer runs in its own CI.
 conformance = ["dep:bitcoin"]
+# For signers that hand a device a whole PSBT: input checks, internal keys, the signatures it added.
+psbt = ["dep:bitcoin"]
 
 [dev-dependencies]
 logos-signer-interface = { path = ".", features = ["mock", "conformance"] }

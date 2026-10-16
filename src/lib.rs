@@ -10,6 +10,8 @@ pub mod wire;
 pub mod conformance;
 #[cfg(feature = "mock")]
 pub mod mock;
+#[cfg(feature = "psbt")]
+pub mod psbt;
 
 pub use wire::{
     Account, Chain, Collects, ErrorCode, Family, HashItem, JobState, JobStatus, Payload, RequestKind, Result, Scheme,

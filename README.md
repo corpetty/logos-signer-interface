@@ -15,6 +15,7 @@ wallet.
   - `json`: builds a module's replies from a `Signer` and reads them back.
   - `conformance` (feature): the suite every signer runs in its own CI.
   - `mock` (feature): a software signer for tests. It can wait for a device's confirmation, answer wrong on purpose, or take whole requests as a device with a screen does: EVM transactions and messages, and PSBTs, whose digests it works out itself.
+  - `psbt` (feature): for signers that hand a device the whole PSBT, over USB or QR codes. It checks that every input is the account's, names each taproot input's internal key as devices want it, and collects the signatures the device added.
 
 ```toml
 logos-signer-interface = { git = "https://github.com/logos-co/logos-signer-interface", rev = "…" }
