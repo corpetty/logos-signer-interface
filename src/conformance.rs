@@ -328,6 +328,14 @@ pub fn accounts_are_public_and_match_info<S: Signer>(s: &mut S) {
             a.id,
             a.family
         );
+        // Optional for EVM, required for Bitcoin below: when there, 8 hex digits.
+        if let Some(fp) = a.fingerprint.as_deref() {
+            assert!(
+                fp.len() == 8 && fp.bytes().all(|b| b.is_ascii_hexdigit()),
+                "{}: fingerprint {fp:?}, 8 hex digits",
+                a.id
+            );
+        }
         match a.family {
             Family::Evm => {
                 let addr = a.address.as_deref().unwrap_or_default();

@@ -54,6 +54,10 @@ pub struct MockOptions {
     /// The words its keys come from; another phrase keeps it apart from a keystore's test keys.
     pub phrase: String,
     pub doctor: Doctor,
+    /// `signer_info`'s kind: another signer's, to stand in for it beside a real one.
+    pub kind: String,
+    /// Whether its "device" starts plugged in.
+    pub available: bool,
 }
 
 impl Default for MockOptions {
@@ -65,6 +69,8 @@ impl Default for MockOptions {
             request_kinds: vec![RequestKind::Hash],
             phrase: PHRASE.into(),
             doctor: Doctor::None,
+            kind: "mock".into(),
+            available: true,
         }
     }
 }
@@ -129,12 +135,15 @@ impl MockSigner {
                 key,
             });
         }
-        MockSigner {
+        let available = opts.available;
+        let mut s = MockSigner {
             opts,
             accounts,
             jobs: JobTable::new(),
             waiting: Vec::new(),
-        }
+        };
+        s.set_available(available);
+        s
     }
 
     /// Answer wrong from now on, or rightly again.
@@ -398,7 +407,7 @@ impl Signer for MockSigner {
     fn info(&self) -> SignerInfo {
         SignerInfo {
             interface: INTERFACE.into(),
-            kind: "mock".into(),
+            kind: self.opts.kind.clone(),
             model: "software keys".into(),
             families: vec![Family::Evm, Family::Bitcoin, Family::BitcoinTaproot],
             request_kinds: self.opts.request_kinds.clone(),
