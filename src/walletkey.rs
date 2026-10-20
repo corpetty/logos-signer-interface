@@ -5,10 +5,10 @@
 use std::str::FromStr;
 
 use bip32::XPub;
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
-use rand_core::{OsRng, RngCore};
+use rand_core::OsRng;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -101,12 +101,11 @@ impl AccountKeys {
     }
 
     pub fn seal(&self, roster_key: &str, xpub: &str) -> Result<String> {
-        let mut nonce = [0u8; 24];
-        OsRng.fill_bytes(&mut nonce);
+        let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
         let sealed = self
             .cipher()?
             .encrypt(
-                &XNonce::from(nonce),
+                &nonce,
                 Payload {
                     msg: xpub.as_bytes(),
                     aad: roster_key.as_bytes(),
