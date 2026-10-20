@@ -217,6 +217,12 @@ pub struct WalletKey {
     pub xpub: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_key: Option<Secret>,
+    /// `created` when the signer made the seed itself, so the wallet has no history; else `restored`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// The wallet's first possible day, `YYYY-MM-DD`, when the signer knows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub birthday: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]

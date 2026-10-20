@@ -241,6 +241,8 @@ impl MockSigner {
         Ok(WalletKey {
             xpub: a.xpub.clone().unwrap_or_default(),
             database_key: Some(keys.database_key()),
+            origin: Some("restored".into()),
+            birthday: None,
         })
     }
 

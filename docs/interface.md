@@ -144,10 +144,10 @@ carries their jobs.**
 
 As `sign_status`. A device holding another seed fails with `wrong_seed`.
 
-### `wallet_key_result(job) → { ok, job, xpub, databaseKey? }`
+### `wallet_key_result(job) → { ok, job, xpub, databaseKey?, origin?, birthday? }`
 
 Once: the job forgets its answer when it is read, or a minute after it settles. `databaseKey` is
-32 bytes hex; an account that `opensByPassword` has none.
+32 bytes hex; an account that `opensByPassword` has none. `origin` is `created` when the signer made the seed itself (the wallet has no history) or `restored`, and `birthday` the wallet's first possible day, `YYYY-MM-DD`, when known.
 
 ### `cancel_wallet_key(job) → { ok, job }`
 
