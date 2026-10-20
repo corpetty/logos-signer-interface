@@ -4,6 +4,7 @@
 
 pub mod jobs;
 pub mod verify;
+pub mod walletkey;
 pub mod wire;
 
 #[cfg(feature = "conformance")]
@@ -15,10 +16,14 @@ pub mod psbt;
 
 pub use wire::{
     Account, Chain, Collects, ErrorCode, Family, HashItem, JobState, JobStatus, Payload, RequestKind, Result, Scheme,
-    Secret, SignRequest, Signature, SignerError, SignerInfo,
+    Secret, SignRequest, Signature, SignerError, SignerInfo, WalletKey, WalletKeyRequest,
 };
 
 pub const INTERFACE: &str = "logos.signer/1";
+
+fn unsupported(what: &str) -> SignerError {
+    SignerError::new(ErrorCode::Unsupported, format!("this signer has no {what}"))
+}
 
 /// A signer, in process. A module's glue maps each method onto the IPC contract with [`json`].
 pub trait Signer {
@@ -29,6 +34,22 @@ pub trait Signer {
     fn status(&mut self, job: &str) -> Result<JobStatus>;
     fn result(&mut self, job: &str) -> Result<Vec<Signature>>;
     fn cancel(&mut self, job: &str) -> Result<()>;
+
+    /// Starts working out a Bitcoin account's open key ([`walletkey`]) and returns a job id. Only the
+    /// signer manager may call these four, and no public event carries their jobs.
+    fn wallet_key(&mut self, _request: WalletKeyRequest) -> Result<String> {
+        Err(unsupported("wallet_key"))
+    }
+    fn wallet_key_status(&mut self, _job: &str) -> Result<JobStatus> {
+        Err(unsupported("wallet_key"))
+    }
+    /// The answer, once: the job forgets it.
+    fn wallet_key_result(&mut self, _job: &str) -> Result<WalletKey> {
+        Err(unsupported("wallet_key"))
+    }
+    fn cancel_wallet_key(&mut self, _job: &str) -> Result<()> {
+        Err(unsupported("wallet_key"))
+    }
 }
 
 /// The IPC replies, built from a [`Signer`], and read back by the manager.
@@ -71,6 +92,30 @@ pub mod json {
         reply(s.cancel(job), |_| json!({ "job": job }))
     }
 
+    pub fn wallet_key(s: &mut impl Signer, request_json: &str) -> String {
+        let request = serde_json::from_str::<WalletKeyRequest>(request_json)
+            .map_err(|e| SignerError::new(ErrorCode::Invalid, format!("request: {e}")));
+        reply(request.and_then(|r| s.wallet_key(r)), |job| json!({ "job": job }))
+    }
+
+    pub fn wallet_key_status(s: &mut impl Signer, job: &str) -> String {
+        reply(s.wallet_key_status(job), |st| {
+            serde_json::to_value(st).unwrap_or_default()
+        })
+    }
+
+    pub fn wallet_key_result(s: &mut impl Signer, job: &str) -> String {
+        reply(s.wallet_key_result(job), |k| {
+            let mut v = serde_json::to_value(k).unwrap_or_default();
+            v["job"] = job.into();
+            v
+        })
+    }
+
+    pub fn cancel_wallet_key(s: &mut impl Signer, job: &str) -> String {
+        reply(s.cancel_wallet_key(job), |_| json!({ "job": job }))
+    }
+
     fn field<T: serde::de::DeserializeOwned>(v: serde_json::Value, name: Option<&str>) -> Result<T> {
         let v = match name {
             Some(n) => v.get(n).cloned().unwrap_or_default(),
@@ -97,5 +142,9 @@ pub mod json {
 
     pub fn read_signatures(reply: &str) -> Result<Vec<Signature>> {
         field(parse_reply(reply)?, Some("signatures"))
+    }
+
+    pub fn read_wallet_key(reply: &str) -> Result<WalletKey> {
+        field(parse_reply(reply)?, None)
     }
 }

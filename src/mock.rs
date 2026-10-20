@@ -11,8 +11,9 @@ use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::{schnorr, PublicKey};
 use sha3::{Digest, Keccak256};
 
-use crate::jobs::JobTable;
+use crate::jobs::{JobTable, KeyJobs};
 use crate::verify::{bip86_tweak, evm_address, hex32, relative};
+use crate::walletkey::{account_keys, check_xpub, is_reserved, roster_key, wallet_key_path};
 use crate::wire::*;
 use crate::{Signer, INTERFACE};
 
@@ -58,6 +59,8 @@ pub struct MockOptions {
     pub kind: String,
     /// Whether its "device" starts plugged in.
     pub available: bool,
+    /// Lists its Bitcoin accounts' xpubs, as signers did before `wallet_key`.
+    pub list_xpub: bool,
 }
 
 impl Default for MockOptions {
@@ -71,6 +74,7 @@ impl Default for MockOptions {
             doctor: Doctor::None,
             kind: "mock".into(),
             available: true,
+            list_xpub: true,
         }
     }
 }
@@ -82,9 +86,12 @@ struct Held {
 
 pub struct MockSigner {
     opts: MockOptions,
+    seed: [u8; 64],
     accounts: Vec<Held>,
     jobs: JobTable,
     waiting: Vec<(String, SignRequest)>,
+    keys: KeyJobs,
+    waiting_keys: Vec<(String, WalletKeyRequest)>,
 }
 
 fn fingerprint(master: &XPrv) -> String {
@@ -110,6 +117,8 @@ impl MockSigner {
                 fingerprint: Some(fp.clone()),
                 address: Some(address),
                 xpub: None,
+                key: None,
+                opens_by_password: false,
                 label: Some("Mock EVM".into()),
                 available: true,
             },
@@ -120,6 +129,7 @@ impl MockSigner {
             ("mock-taproot", Family::BitcoinTaproot, "m/86'/1'/0'", "Mock taproot"),
         ] {
             let key = derive(path);
+            let xpub = key.public_key().to_string(Prefix::TPUB);
             accounts.push(Held {
                 account: Account {
                     id: id.into(),
@@ -128,7 +138,9 @@ impl MockSigner {
                     path: Some(path.into()),
                     fingerprint: Some(fp.clone()),
                     address: None,
-                    xpub: Some(key.public_key().to_string(Prefix::TPUB)),
+                    key: roster_key(family, Some(Chain::Test), &xpub).ok(),
+                    xpub: Some(xpub),
+                    opens_by_password: false,
                     label: Some(label.into()),
                     available: true,
                 },
@@ -138,9 +150,12 @@ impl MockSigner {
         let available = opts.available;
         let mut s = MockSigner {
             opts,
+            seed,
             accounts,
             jobs: JobTable::new(),
             waiting: Vec::new(),
+            keys: KeyJobs::new(),
+            waiting_keys: Vec::new(),
         };
         s.set_available(available);
         s
@@ -168,8 +183,18 @@ impl MockSigner {
         self.waiting.clone()
     }
 
-    /// The person confirms on the "device".
+    /// Open-key jobs waiting for the person.
+    pub fn waiting_keys(&self) -> Vec<String> {
+        self.waiting_keys.iter().map(|(j, _)| j.clone()).collect()
+    }
+
+    /// The person confirms on the "device": a signature or an open key.
     pub fn confirm(&mut self, job: &str) -> Result<()> {
+        if let Some(at) = self.waiting_keys.iter().position(|(j, _)| j == job) {
+            let (_, request) = self.waiting_keys.remove(at);
+            let outcome = self.key_now(&request);
+            return self.keys.finish(job, outcome);
+        }
         let at = self.waiting.iter().position(|(j, _)| j == job);
         let Some(at) = at else {
             return Err(SignerError::new(ErrorCode::UnknownJob, job));
@@ -181,9 +206,42 @@ impl MockSigner {
 
     /// The person declines on the "device".
     pub fn refuse(&mut self, job: &str) -> Result<()> {
+        let declined = || SignerError::new(ErrorCode::Refused, "declined on the device");
+        if self.waiting_keys.iter().any(|(j, _)| j == job) {
+            self.waiting_keys.retain(|(j, _)| j != job);
+            return self.keys.finish(job, Err(declined()));
+        }
         self.waiting.retain(|(j, _)| j != job);
-        self.jobs
-            .finish(job, Err(SignerError::new(ErrorCode::Refused, "declined on the device")))
+        self.jobs.finish(job, Err(declined()))
+    }
+
+    fn check_secret(&self, secret: &Option<Secret>) -> Result<()> {
+        if self.opts.collects == Collects::Nothing {
+            return Ok(());
+        }
+        match secret {
+            None => Err(SignerError::new(ErrorCode::Locked, "this signer needs its secret")),
+            Some(s) if s.expose() != self.opts.secret => Err(SignerError::new(ErrorCode::WrongSecret, "wrong secret")),
+            Some(_) => Ok(()),
+        }
+    }
+
+    /// The account's key at its reserved path, as a device works it out from its seed.
+    fn key_now(&self, request: &WalletKeyRequest) -> Result<WalletKey> {
+        let internal = |e: String| SignerError::new(ErrorCode::Internal, e);
+        let held = self.held(&request.account)?;
+        let a = &held.account;
+        let key = a
+            .key
+            .as_deref()
+            .ok_or_else(|| SignerError::new(ErrorCode::Unsupported, "not a Bitcoin account"))?;
+        let path = DerivationPath::from_str(&wallet_key_path(key)?).map_err(|e| internal(e.to_string()))?;
+        let at = XPrv::derive_from_path(self.seed, &path).map_err(|e| internal(e.to_string()))?;
+        let keys = account_keys(at.public_key().public_key().to_encoded_point(true).as_bytes())?;
+        Ok(WalletKey {
+            xpub: a.xpub.clone().unwrap_or_default(),
+            database_key: Some(keys.database_key()),
+        })
     }
 
     fn held(&self, id: &str) -> Result<&Held> {
@@ -413,30 +471,45 @@ impl Signer for MockSigner {
             request_kinds: self.opts.request_kinds.clone(),
             shows_request: self.opts.needs_confirmation,
             collects: self.opts.collects,
+            wallet_key: true,
         }
     }
 
     fn accounts(&mut self) -> Result<Vec<Account>> {
-        Ok(self.accounts.iter().map(|h| h.account.clone()).collect())
+        let list = self.opts.list_xpub;
+        Ok(self
+            .accounts
+            .iter()
+            .map(|h| {
+                let mut a = h.account.clone();
+                if !list {
+                    a.xpub = None;
+                }
+                a
+            })
+            .collect())
     }
 
     fn sign(&mut self, request: SignRequest) -> Result<String> {
-        self.held(&request.account)?;
+        let held = self.held(&request.account)?;
+        if let (Some(xpub), Some(key)) = (request.xpub.as_deref(), held.account.key.as_deref()) {
+            check_xpub(key, held.account.family, held.account.chain, xpub)?;
+        }
+        if let Payload::Hash { items } = &request.payload {
+            if items.iter().any(|i| i.path.as_deref().is_some_and(is_reserved)) {
+                return Err(SignerError::new(
+                    ErrorCode::Invalid,
+                    "nothing signs under the reserved purpose",
+                ));
+            }
+        }
         if !self.opts.request_kinds.contains(&request.payload.kind()) {
             return Err(SignerError::new(
                 ErrorCode::Unsupported,
                 format!("{:?}", request.payload.kind()),
             ));
         }
-        if self.opts.collects != Collects::Nothing {
-            match &request.secret {
-                None => return Err(SignerError::new(ErrorCode::Locked, "this signer needs its secret")),
-                Some(s) if s.expose() != self.opts.secret => {
-                    return Err(SignerError::new(ErrorCode::WrongSecret, "wrong secret"))
-                }
-                Some(_) => {}
-            }
-        }
+        self.check_secret(&request.secret)?;
         if self.opts.needs_confirmation {
             let job = self.jobs.start(JobState::ConfirmOnDevice);
             self.waiting.push((job.clone(), request));
@@ -459,5 +532,38 @@ impl Signer for MockSigner {
     fn cancel(&mut self, job: &str) -> Result<()> {
         self.waiting.retain(|(j, _)| j != job);
         self.jobs.cancel(job)
+    }
+
+    fn wallet_key(&mut self, request: WalletKeyRequest) -> Result<String> {
+        let held = self.held(&request.account)?;
+        if !held.account.family.is_bitcoin() {
+            return Err(SignerError::new(ErrorCode::Unsupported, "only a Bitcoin account opens"));
+        }
+        if !held.account.available {
+            return Err(SignerError::new(ErrorCode::Unavailable, "the device is not connected"));
+        }
+        self.check_secret(&request.secret)?;
+        if self.opts.needs_confirmation {
+            let job = self.keys.start(JobState::ConfirmOnDevice);
+            self.waiting_keys.push((job.clone(), request));
+            return Ok(job);
+        }
+        let job = self.keys.start(JobState::Working);
+        let outcome = self.key_now(&request);
+        self.keys.finish(&job, outcome)?;
+        Ok(job)
+    }
+
+    fn wallet_key_status(&mut self, job: &str) -> Result<JobStatus> {
+        self.keys.status(job)
+    }
+
+    fn wallet_key_result(&mut self, job: &str) -> Result<WalletKey> {
+        self.keys.take(job)
+    }
+
+    fn cancel_wallet_key(&mut self, job: &str) -> Result<()> {
+        self.waiting_keys.retain(|(j, _)| j != job);
+        self.keys.cancel(job)
     }
 }

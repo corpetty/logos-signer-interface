@@ -103,6 +103,7 @@ fn a_refusal_on_the_device_is_a_refused_job_with_no_signatures() {
             items: conformance::items_for(&account),
         },
         secret: None,
+        xpub: None,
     };
     let job = s.sign(req).unwrap();
     assert_eq!(s.status(&job).unwrap().state, JobState::ConfirmOnDevice);
@@ -124,6 +125,7 @@ fn a_cancelled_job_never_signs() {
             items: conformance::items_for(&account),
         },
         secret: None,
+        xpub: None,
     };
     let job = s.sign(req).unwrap();
     s.cancel(&job).unwrap();
@@ -155,6 +157,7 @@ fn the_json_replies_read_back_as_they_were_written() {
             items: conformance::items_for(&accounts[1]),
         },
         secret: Some(Secret::new("123456")),
+        xpub: None,
     };
     let job = json::read_job(&json::sign(&mut s, &serde_json::to_string(&req).unwrap())).unwrap();
     let status = json::read_status(&json::sign_status(&mut s, &job)).unwrap();
@@ -188,6 +191,7 @@ fn a_secret_never_prints() {
         account: "a".into(),
         payload: Payload::Hash { items: vec![] },
         secret: Some(s),
+        xpub: None,
     };
     assert!(!format!("{req:?}").contains("hunter2"));
 }
@@ -212,6 +216,7 @@ fn check_refuses_a_signature_over_another_digest_or_by_another_account() {
             account: account.id.clone(),
             payload: Payload::Hash { items: items.clone() },
             secret: None,
+            xpub: None,
         };
         let job = s.sign(req).unwrap();
         let sig = s.result(&job).unwrap().remove(0);
@@ -241,4 +246,118 @@ fn check_refuses_a_signature_over_another_digest_or_by_another_account() {
             );
         }
     }
+}
+
+#[test]
+fn a_signer_that_seals_its_xpubs_passes() {
+    for needs_confirmation in [false, true] {
+        let mut s = MockSigner::new(MockOptions {
+            list_xpub: false,
+            needs_confirmation,
+            ..Default::default()
+        });
+        assert!(s.accounts().unwrap().iter().all(|a| a.xpub.is_none()));
+        conformance::run(
+            &mut s,
+            &Fixture {
+                secret: None,
+                wrong_secret: None,
+            },
+            &mut |s, job| {
+                let _ = s.confirm(job);
+            },
+        );
+    }
+}
+
+fn database_key(s: &mut MockSigner, account: &str) -> Secret {
+    let job = s
+        .wallet_key(WalletKeyRequest {
+            account: account.into(),
+            secret: None,
+        })
+        .unwrap();
+    s.wallet_key_result(&job).unwrap().database_key.unwrap()
+}
+
+#[test]
+fn every_holder_of_a_seed_opens_an_account_with_the_same_key() {
+    let mut keystore = MockSigner::new(MockOptions::default());
+    let mut device = MockSigner::new(MockOptions {
+        kind: "keycard".into(),
+        list_xpub: false,
+        ..Default::default()
+    });
+    let mut other = MockSigner::new(MockOptions {
+        phrase: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".into(),
+        ..Default::default()
+    });
+    let one = database_key(&mut keystore, "mock-segwit");
+    assert_eq!(database_key(&mut device, "mock-segwit"), one);
+    assert_ne!(database_key(&mut keystore, "mock-taproot"), one);
+    assert_ne!(database_key(&mut other, "mock-segwit"), one);
+}
+
+#[test]
+fn an_unplugged_device_gives_no_open_key() {
+    let mut s = MockSigner::new(MockOptions {
+        available: false,
+        ..Default::default()
+    });
+    let e = s
+        .wallet_key(WalletKeyRequest {
+            account: "mock-segwit".into(),
+            secret: None,
+        })
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Unavailable);
+}
+
+#[test]
+fn an_open_key_reads_once_over_json() {
+    let mut s = MockSigner::new(MockOptions::default());
+    let job = json::read_job(&json::wallet_key(&mut s, r#"{"account":"mock-segwit"}"#)).unwrap();
+    let key = json::read_wallet_key(&json::wallet_key_result(&mut s, &job)).unwrap();
+    assert!(key.xpub.starts_with("tpub") && key.database_key.is_some());
+    assert!(json::read_wallet_key(&json::wallet_key_result(&mut s, &job)).is_err());
+    let evm = json::read_job(&json::wallet_key(
+        &mut s,
+        r#"{"account":"0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"}"#,
+    ));
+    assert_eq!(evm.unwrap_err().code, ErrorCode::Unsupported);
+}
+
+#[test]
+fn the_roster_key_is_the_one_the_manager_computes() {
+    use sha2::{Digest, Sha256};
+    use std::str::FromStr;
+    let mut s = MockSigner::new(MockOptions::default());
+    for a in s.accounts().unwrap().into_iter().filter(|a| a.family.is_bitcoin()) {
+        let xpub = bitcoin::bip32::Xpub::from_str(a.xpub.as_deref().unwrap()).unwrap();
+        let mut h = Sha256::new();
+        h.update(serde_json::to_string(&a.family).unwrap().as_bytes());
+        h.update(serde_json::to_string(&a.chain).unwrap().as_bytes());
+        h.update(xpub.chain_code.as_bytes());
+        h.update(xpub.public_key.serialize());
+        let manager = format!("btc_{}", hex::encode(&h.finalize()[..16]));
+        assert_eq!(a.key.as_deref(), Some(manager.as_str()), "{}", a.id);
+    }
+}
+
+#[test]
+fn nothing_signs_under_the_reserved_purpose() {
+    let mut s = MockSigner::new(MockOptions::default());
+    let req = SignRequest {
+        account: "mock-segwit".into(),
+        payload: Payload::Hash {
+            items: vec![HashItem {
+                path: Some("m/1280263247'/0'".into()),
+                scheme: Scheme::Ecdsa,
+                digest: "00".repeat(32),
+            }],
+        },
+        secret: None,
+        xpub: None,
+    };
+    assert_eq!(s.sign(req).unwrap_err().code, ErrorCode::Invalid);
 }

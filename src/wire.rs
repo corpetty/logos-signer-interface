@@ -58,6 +58,9 @@ pub struct SignerInfo {
     /// The device shows the request on its own screen.
     pub shows_request: bool,
     pub collects: Collects,
+    /// Answers `wallet_key`: the key that opens a Bitcoin account's data, from its seed.
+    #[serde(default)]
+    pub wallet_key: bool,
 }
 
 /// Public material only. `id` is what `sign` names.
@@ -77,8 +80,16 @@ pub struct Account {
     pub fingerprint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address: Option<String>,
+    /// Listed only by a signer that doesn't seal it; see `key`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub xpub: Option<String>,
+    /// A Bitcoin account's roster key ([`crate::walletkey::roster_key`]): what other signers' copies of
+    /// it share, without its xpub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// Opens only by the Bitcoin app's password: its device can't give the account's open key.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub opens_by_password: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     pub available: bool,
@@ -182,6 +193,30 @@ pub struct SignRequest {
     pub payload: Payload,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret: Option<Secret>,
+    /// A Bitcoin account's xpub, from the wallet that has it open. The signer checks it against the
+    /// account's roster key before using it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xpub: Option<String>,
+}
+
+/// What the manager asks for when a Bitcoin account opens. A module may read more fields from the
+/// same JSON, such as an account another module routes to it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WalletKeyRequest {
+    pub account: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<Secret>,
+}
+
+/// An opened account: its xpub, and the database key its seed gives. An account that opens by
+/// password has no database key from its signer.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WalletKey {
+    pub xpub: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_key: Option<Secret>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -255,6 +290,8 @@ pub enum ErrorCode {
     Refused,
     Invalid,
     Internal,
+    /// The device holds another seed than the account's.
+    WrongSeed,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
