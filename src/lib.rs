@@ -3,6 +3,7 @@
 //! [`wire`], specified in `docs/interface.md`.
 
 pub mod jobs;
+pub mod sealed;
 pub mod unlock;
 pub mod verify;
 pub mod wallets;

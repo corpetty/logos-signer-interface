@@ -23,6 +23,8 @@ unlocked. Any named module.
 The key, 32 bytes as hex, that the calling module keeps that scope of that wallet's data under:
 `HKDF-SHA256(seed key, "logos/data/v1", module ‖ 0 ‖ scope ‖ 0 ‖ generation)`. The manager names
 the module by its caller identity, so a module only ever gets keys of its own.
+- A signer may name the seed the way it does, its own recogniser for it (a Keycard's key UID, a
+  Shell's master key id), when it is one of that seed's holders.
 - A locked wallet answers `code: locked`.
 - The current generation is the default. An earlier one still answers, so a module reads data
   sealed before the person changed the wallet's keys, and seals it again under the current key.
@@ -54,6 +56,13 @@ Only the manager's configured signers may call it.
 names what it is, a file's name for instance, so one box can't stand in for another.
 [`wallets::generation`](../src/wallets.rs) says which generation to ask for before
 [`wallets::open`](../src/wallets.rs) opens it.
+
+[`sealed::SealedDocs`](../src/sealed.rs) keeps one such box per seed in one file, `{ "v": 1,
+"seeds": { "<seed>": <box> } }` at 0600: a signer's account lists, for instance. A seed's document
+opens once its key arrives (`wanted` says which generation to ask for) and is sealed again under the
+current generation. While the seed is locked, its document is not read and can't be overwritten.
+A document written before its seed's key is known, such as the accounts of a seed just added,
+waits in memory until the key comes.
 
 A module calling `data_key` from inside a call the manager made to it would wait on itself. A signer
 asks for its keys when `wallets_changed` says a wallet unlocked, never while answering
