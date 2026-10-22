@@ -5,6 +5,7 @@
 pub mod jobs;
 pub mod unlock;
 pub mod verify;
+pub mod wallets;
 pub mod wire;
 
 #[cfg(feature = "conformance")]
