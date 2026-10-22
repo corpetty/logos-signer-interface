@@ -7,10 +7,10 @@ module signer {
   method sign_status(job: tstr) -> tstr
   method sign_result(job: tstr) -> tstr
   method cancel_sign(job: tstr) -> tstr
-  method wallet_key(request_json: tstr) -> tstr
-  method wallet_key_status(job: tstr) -> tstr
-  method wallet_key_result(job: tstr) -> tstr
-  method cancel_wallet_key(job: tstr) -> tstr
+  method unlock_key(request_json: tstr) -> tstr
+  method unlock_key_status(job: tstr) -> tstr
+  method unlock_key_result(job: tstr) -> tstr
+  method cancel_unlock_key(job: tstr) -> tstr
   event signer_accounts_changed(count: int)
   event signer_changed(state: tstr)
   event sign_progress(job: tstr, state: tstr)

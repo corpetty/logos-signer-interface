@@ -58,9 +58,9 @@ pub struct SignerInfo {
     /// The device shows the request on its own screen.
     pub shows_request: bool,
     pub collects: Collects,
-    /// Answers `wallet_key`: the key that opens a Bitcoin account's data, from its seed.
+    /// Answers `unlock_key`: the key, from a seed, that unlocks that seed's data.
     #[serde(default)]
-    pub wallet_key: bool,
+    pub unlock_key: bool,
 }
 
 /// Public material only. `id` is what `sign` names.
@@ -80,16 +80,18 @@ pub struct Account {
     pub fingerprint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address: Option<String>,
-    /// Listed only by a signer that doesn't seal it; see `key`.
+    /// A Bitcoin account's xpub. Listed to the signer manager only, and only while the account's
+    /// seed is unlocked: at rest a signer keeps it encrypted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub xpub: Option<String>,
-    /// A Bitcoin account's roster key ([`crate::walletkey::roster_key`]): what other signers' copies of
-    /// it share, without its xpub.
+    /// A Bitcoin account's roster key ([`crate::unlock::roster_key`]): what other signers' copies of it
+    /// share, whatever the xpub's metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
-    /// Opens only by the Bitcoin app's password: its device can't give the account's open key.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub opens_by_password: bool,
+    /// The seed the account comes from, as this signer names it: a Keycard's key UID, a Shell's
+    /// master key id, a QR wallet's master fingerprint, a keystore wallet's id. `unlock_key` takes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     pub available: bool,
@@ -199,30 +201,25 @@ pub struct SignRequest {
     pub xpub: Option<String>,
 }
 
-/// What the manager asks for when a Bitcoin account opens. A module may read more fields from the
-/// same JSON, such as an account another module routes to it.
+/// What the manager asks for when a seed unlocks. A module may read more fields from the same JSON,
+/// such as an account another module routes to it.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct WalletKeyRequest {
-    pub account: String,
+pub struct UnlockKeyRequest {
+    /// The seed, as this signer names it ([`Account::seed`]).
+    pub seed: String,
+    /// The seed's unlock index ([`crate::unlock::unlock_key_path`]).
+    #[serde(default)]
+    pub index: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret: Option<Secret>,
 }
 
-/// An opened account: its xpub, and the database key its seed gives. An account that opens by
-/// password has no database key from its signer.
+/// A seed's unlock key: the compressed public key at its unlock path, 33 bytes as hex.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct WalletKey {
-    pub xpub: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub database_key: Option<Secret>,
-    /// `created` when the signer made the seed itself, so the wallet has no history; else `restored`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origin: Option<String>,
-    /// The wallet's first possible day, `YYYY-MM-DD`, when the signer knows it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub birthday: Option<String>,
+pub struct UnlockKey {
+    pub key: Secret,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]

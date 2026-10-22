@@ -248,83 +248,99 @@ fn check_refuses_a_signature_over_another_digest_or_by_another_account() {
     }
 }
 
-#[test]
-fn a_signer_that_seals_its_xpubs_passes() {
-    for needs_confirmation in [false, true] {
-        let mut s = MockSigner::new(MockOptions {
-            list_xpub: false,
-            needs_confirmation,
-            ..Default::default()
-        });
-        assert!(s.accounts().unwrap().iter().all(|a| a.xpub.is_none()));
-        conformance::run(
-            &mut s,
-            &Fixture {
-                secret: None,
-                wrong_secret: None,
-            },
-            &mut |s, job| {
-                let _ = s.confirm(job);
-            },
-        );
-    }
+fn unlock_key(s: &mut MockSigner, seed: &str, index: u32) -> Result<Secret> {
+    let job = s.unlock_key(UnlockKeyRequest {
+        seed: seed.into(),
+        index,
+        secret: None,
+    })?;
+    Ok(s.unlock_key_result(&job)?.key)
 }
 
-fn database_key(s: &mut MockSigner, account: &str) -> Secret {
-    let job = s
-        .wallet_key(WalletKeyRequest {
-            account: account.into(),
-            secret: None,
-        })
-        .unwrap();
-    s.wallet_key_result(&job).unwrap().database_key.unwrap()
+fn seed_of(s: &mut MockSigner) -> String {
+    s.accounts().unwrap()[0].seed.clone().unwrap()
 }
 
 #[test]
-fn every_holder_of_a_seed_opens_an_account_with_the_same_key() {
+fn every_holder_of_a_seed_gives_the_same_unlock_key() {
     let mut keystore = MockSigner::new(MockOptions::default());
     let mut device = MockSigner::new(MockOptions {
         kind: "keycard".into(),
-        list_xpub: false,
         ..Default::default()
     });
     let mut other = MockSigner::new(MockOptions {
         phrase: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".into(),
         ..Default::default()
     });
-    let one = database_key(&mut keystore, "mock-segwit");
-    assert_eq!(database_key(&mut device, "mock-segwit"), one);
-    assert_ne!(database_key(&mut keystore, "mock-taproot"), one);
-    assert_ne!(database_key(&mut other, "mock-segwit"), one);
+    let seed = seed_of(&mut keystore);
+    assert_eq!(seed_of(&mut device), seed);
+    assert!(keystore
+        .accounts()
+        .unwrap()
+        .iter()
+        .all(|a| a.seed.as_deref() == Some(seed.as_str())));
+    let one = unlock_key(&mut keystore, &seed, 0).unwrap();
+    assert_eq!(unlock_key(&mut device, &seed, 0).unwrap(), one);
+    assert_ne!(unlock_key(&mut keystore, &seed, 1).unwrap(), one);
+
+    let theirs = seed_of(&mut other);
+    assert_ne!(theirs, seed);
+    assert_ne!(unlock_key(&mut other, &theirs, 0).unwrap(), one);
+    assert_eq!(unlock_key(&mut other, &seed, 0).unwrap_err().code, ErrorCode::WrongSeed);
 }
 
 #[test]
-fn an_unplugged_device_gives_no_open_key() {
+fn the_unlock_key_is_the_public_key_at_the_unlock_path() {
+    use bitcoin::bip32::{DerivationPath, Xpriv, Xpub};
+    use bitcoin::secp256k1::Secp256k1;
+    use sha2::{Digest, Sha256};
+    use std::str::FromStr;
+
+    let mut seed = [0u8; 64];
+    pbkdf2::pbkdf2_hmac::<sha2::Sha512>(mock::PHRASE.as_bytes(), b"mnemonic", 2048, &mut seed);
+    let secp = Secp256k1::new();
+    let master = Xpriv::new_master(bitcoin::NetworkKind::Test, &seed).unwrap();
+    let at = master
+        .derive_priv(&secp, &DerivationPath::from_str("m/1280263247'/0'").unwrap())
+        .unwrap();
+    let expected = hex::encode(Xpub::from_priv(&secp, &at).public_key.serialize());
+
+    let mut s = MockSigner::new(MockOptions::default());
+    let named = hex::encode(Sha256::digest(
+        Xpub::from_priv(&secp, &master).public_key.serialize_uncompressed(),
+    ));
+    assert_eq!(seed_of(&mut s), named, "a seed is named as a Keycard names it");
+    assert_eq!(unlock_key(&mut s, &named, 0).unwrap().expose(), expected);
+}
+
+#[test]
+fn an_unplugged_device_gives_no_unlock_key() {
     let mut s = MockSigner::new(MockOptions {
         available: false,
         ..Default::default()
     });
-    let e = s
-        .wallet_key(WalletKeyRequest {
-            account: "mock-segwit".into(),
-            secret: None,
-        })
-        .unwrap_err();
-    assert_eq!(e.code, ErrorCode::Unavailable);
+    let seed = seed_of(&mut s);
+    assert_eq!(unlock_key(&mut s, &seed, 0).unwrap_err().code, ErrorCode::Unavailable);
 }
 
 #[test]
-fn an_open_key_reads_once_over_json() {
+fn an_unlock_key_reads_once_over_json() {
     let mut s = MockSigner::new(MockOptions::default());
-    let job = json::read_job(&json::wallet_key(&mut s, r#"{"account":"mock-segwit"}"#)).unwrap();
-    let key = json::read_wallet_key(&json::wallet_key_result(&mut s, &job)).unwrap();
-    assert!(key.xpub.starts_with("tpub") && key.database_key.is_some());
-    assert!(json::read_wallet_key(&json::wallet_key_result(&mut s, &job)).is_err());
-    let evm = json::read_job(&json::wallet_key(
+    let seed = seed_of(&mut s);
+    let job = json::read_job(&json::unlock_key(&mut s, &format!(r#"{{"seed":"{seed}","index":0}}"#))).unwrap();
+    let key = json::read_unlock_key(&json::unlock_key_result(&mut s, &job)).unwrap();
+    assert_eq!(key.key.expose().len(), 66);
+    assert!(json::read_unlock_key(&json::unlock_key_result(&mut s, &job)).is_err());
+    let foreign = json::read_job(&json::unlock_key(
         &mut s,
-        r#"{"account":"0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"}"#,
+        &format!(r#"{{"seed":"{}"}}"#, "0".repeat(64)),
     ));
-    assert_eq!(evm.unwrap_err().code, ErrorCode::Unsupported);
+    assert_eq!(foreign.unwrap_err().code, ErrorCode::WrongSeed);
+    let past = json::read_job(&json::unlock_key(
+        &mut s,
+        &format!(r#"{{"seed":"{seed}","index":2147483648}}"#),
+    ));
+    assert!(past.is_err());
 }
 
 #[test]

@@ -9,11 +9,12 @@ use bip32::{ChildNumber, DerivationPath, Prefix, XPrv};
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::{schnorr, PublicKey};
+use sha2::Sha256;
 use sha3::{Digest, Keccak256};
 
 use crate::jobs::{JobTable, KeyJobs};
+use crate::unlock::{check_xpub, is_reserved, roster_key, unlock_key_path};
 use crate::verify::{bip86_tweak, evm_address, hex32, relative};
-use crate::walletkey::{account_keys, check_xpub, is_reserved, roster_key, wallet_key_path};
 use crate::wire::*;
 use crate::{Signer, INTERFACE};
 
@@ -59,8 +60,6 @@ pub struct MockOptions {
     pub kind: String,
     /// Whether its "device" starts plugged in.
     pub available: bool,
-    /// Lists its Bitcoin accounts' xpubs, as signers did before `wallet_key`.
-    pub list_xpub: bool,
 }
 
 impl Default for MockOptions {
@@ -74,7 +73,6 @@ impl Default for MockOptions {
             doctor: Doctor::None,
             kind: "mock".into(),
             available: true,
-            list_xpub: true,
         }
     }
 }
@@ -87,15 +85,22 @@ struct Held {
 pub struct MockSigner {
     opts: MockOptions,
     seed: [u8; 64],
+    recogniser: String,
     accounts: Vec<Held>,
     jobs: JobTable,
     waiting: Vec<(String, SignRequest)>,
     keys: KeyJobs,
-    waiting_keys: Vec<(String, WalletKeyRequest)>,
+    waiting_keys: Vec<(String, UnlockKeyRequest)>,
 }
 
 fn fingerprint(master: &XPrv) -> String {
     hex::encode(master.public_key().fingerprint())
+}
+
+/// How it names its seed, as a Keycard does: the SHA-256 of the uncompressed master public key.
+fn recogniser(master: &XPrv) -> String {
+    let point = master.public_key().public_key().to_encoded_point(false);
+    hex::encode(Sha256::digest(point.as_bytes()))
 }
 
 impl MockSigner {
@@ -104,6 +109,7 @@ impl MockSigner {
         pbkdf2::pbkdf2_hmac::<sha2::Sha512>(opts.phrase.as_bytes(), b"mnemonic", 2048, &mut seed);
         let master = XPrv::new(seed).expect("master");
         let fp = fingerprint(&master);
+        let seed_id = recogniser(&master);
         let derive = |p: &str| XPrv::derive_from_path(seed, &DerivationPath::from_str(p).unwrap()).unwrap();
 
         let evm = derive("m/44'/60'/0'/0/0");
@@ -118,7 +124,7 @@ impl MockSigner {
                 address: Some(address),
                 xpub: None,
                 key: None,
-                opens_by_password: false,
+                seed: Some(seed_id.clone()),
                 label: Some("Mock EVM".into()),
                 available: true,
             },
@@ -140,7 +146,7 @@ impl MockSigner {
                     address: None,
                     key: roster_key(family, Some(Chain::Test), &xpub).ok(),
                     xpub: Some(xpub),
-                    opens_by_password: false,
+                    seed: Some(seed_id.clone()),
                     label: Some(label.into()),
                     available: true,
                 },
@@ -151,6 +157,7 @@ impl MockSigner {
         let mut s = MockSigner {
             opts,
             seed,
+            recogniser: seed_id,
             accounts,
             jobs: JobTable::new(),
             waiting: Vec::new(),
@@ -183,12 +190,12 @@ impl MockSigner {
         self.waiting.clone()
     }
 
-    /// Open-key jobs waiting for the person.
+    /// Unlock-key jobs waiting for the person.
     pub fn waiting_keys(&self) -> Vec<String> {
         self.waiting_keys.iter().map(|(j, _)| j.clone()).collect()
     }
 
-    /// The person confirms on the "device": a signature or an open key.
+    /// The person confirms on the "device": a signature or an unlock key.
     pub fn confirm(&mut self, job: &str) -> Result<()> {
         if let Some(at) = self.waiting_keys.iter().position(|(j, _)| j == job) {
             let (_, request) = self.waiting_keys.remove(at);
@@ -226,23 +233,14 @@ impl MockSigner {
         }
     }
 
-    /// The account's key at its reserved path, as a device works it out from its seed.
-    fn key_now(&self, request: &WalletKeyRequest) -> Result<WalletKey> {
+    /// The seed's key at its unlock path, as a device works it out.
+    fn key_now(&self, request: &UnlockKeyRequest) -> Result<UnlockKey> {
         let internal = |e: String| SignerError::new(ErrorCode::Internal, e);
-        let held = self.held(&request.account)?;
-        let a = &held.account;
-        let key = a
-            .key
-            .as_deref()
-            .ok_or_else(|| SignerError::new(ErrorCode::Unsupported, "not a Bitcoin account"))?;
-        let path = DerivationPath::from_str(&wallet_key_path(key)?).map_err(|e| internal(e.to_string()))?;
+        let path = DerivationPath::from_str(&unlock_key_path(request.index)?).map_err(|e| internal(e.to_string()))?;
         let at = XPrv::derive_from_path(self.seed, &path).map_err(|e| internal(e.to_string()))?;
-        let keys = account_keys(at.public_key().public_key().to_encoded_point(true).as_bytes())?;
-        Ok(WalletKey {
-            xpub: a.xpub.clone().unwrap_or_default(),
-            database_key: Some(keys.database_key()),
-            origin: Some("restored".into()),
-            birthday: None,
+        let point = at.public_key().public_key().to_encoded_point(true);
+        Ok(UnlockKey {
+            key: Secret::new(hex::encode(point.as_bytes())),
         })
     }
 
@@ -473,23 +471,12 @@ impl Signer for MockSigner {
             request_kinds: self.opts.request_kinds.clone(),
             shows_request: self.opts.needs_confirmation,
             collects: self.opts.collects,
-            wallet_key: true,
+            unlock_key: true,
         }
     }
 
     fn accounts(&mut self) -> Result<Vec<Account>> {
-        let list = self.opts.list_xpub;
-        Ok(self
-            .accounts
-            .iter()
-            .map(|h| {
-                let mut a = h.account.clone();
-                if !list {
-                    a.xpub = None;
-                }
-                a
-            })
-            .collect())
+        Ok(self.accounts.iter().map(|h| h.account.clone()).collect())
     }
 
     fn sign(&mut self, request: SignRequest) -> Result<String> {
@@ -536,12 +523,12 @@ impl Signer for MockSigner {
         self.jobs.cancel(job)
     }
 
-    fn wallet_key(&mut self, request: WalletKeyRequest) -> Result<String> {
-        let held = self.held(&request.account)?;
-        if !held.account.family.is_bitcoin() {
-            return Err(SignerError::new(ErrorCode::Unsupported, "only a Bitcoin account opens"));
+    fn unlock_key(&mut self, request: UnlockKeyRequest) -> Result<String> {
+        unlock_key_path(request.index)?;
+        if !request.seed.eq_ignore_ascii_case(&self.recogniser) {
+            return Err(SignerError::new(ErrorCode::WrongSeed, "not this signer's seed"));
         }
-        if !held.account.available {
+        if !self.accounts.iter().all(|h| h.account.available) {
             return Err(SignerError::new(ErrorCode::Unavailable, "the device is not connected"));
         }
         self.check_secret(&request.secret)?;
@@ -556,15 +543,15 @@ impl Signer for MockSigner {
         Ok(job)
     }
 
-    fn wallet_key_status(&mut self, job: &str) -> Result<JobStatus> {
+    fn unlock_key_status(&mut self, job: &str) -> Result<JobStatus> {
         self.keys.status(job)
     }
 
-    fn wallet_key_result(&mut self, job: &str) -> Result<WalletKey> {
+    fn unlock_key_result(&mut self, job: &str) -> Result<UnlockKey> {
         self.keys.take(job)
     }
 
-    fn cancel_wallet_key(&mut self, job: &str) -> Result<()> {
+    fn cancel_unlock_key(&mut self, job: &str) -> Result<()> {
         self.waiting_keys.retain(|(j, _)| j != job);
         self.keys.cancel(job)
     }

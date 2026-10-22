@@ -4,11 +4,11 @@ use std::time::{Duration, Instant};
 
 use rand_core::{OsRng, RngCore};
 
-use crate::wire::{ErrorCode, JobState, JobStatus, Result, Signature, SignerError, WalletKey};
+use crate::wire::{ErrorCode, JobState, JobStatus, Result, Signature, SignerError, UnlockKey};
 
 /// A finished job's answer is kept this long after it settles.
 pub const RETENTION: Duration = Duration::from_secs(600);
-/// An open key nobody reads is wiped this soon after its job settles.
+/// An unlock key nobody reads is wiped this soon after its job settles.
 pub const KEY_RETENTION: Duration = Duration::from_secs(60);
 
 struct Job {
@@ -141,11 +141,11 @@ struct KeyJob {
     id: String,
     state: JobState,
     error: Option<SignerError>,
-    key: Option<WalletKey>,
+    key: Option<UnlockKey>,
     settled_at: Option<Instant>,
 }
 
-/// `wallet_key` jobs: as [`JobTable`], but an answer is read once and then forgotten.
+/// `unlock_key` jobs: as [`JobTable`], but an answer is read once and then forgotten.
 #[derive(Default)]
 pub struct KeyJobs {
     jobs: Vec<KeyJob>,
@@ -192,7 +192,7 @@ impl KeyJobs {
         Ok(())
     }
 
-    pub fn finish(&mut self, id: &str, outcome: Result<WalletKey>) -> Result<()> {
+    pub fn finish(&mut self, id: &str, outcome: Result<UnlockKey>) -> Result<()> {
         let job = self.find(id)?;
         if job.state.is_final() {
             return Ok(());
@@ -226,7 +226,7 @@ impl KeyJobs {
     }
 
     /// The answer of a done job, once.
-    pub fn take(&mut self, id: &str) -> Result<WalletKey> {
+    pub fn take(&mut self, id: &str) -> Result<UnlockKey> {
         self.sweep();
         let job = self.find(id)?;
         match (job.state, job.key.take()) {
