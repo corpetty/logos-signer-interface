@@ -25,6 +25,9 @@ The key, 32 bytes as hex, that the calling module keeps that scope of that walle
 the module by its caller identity, so a module only ever gets keys of its own.
 - A signer may name the seed the way it does, its own recogniser for it (a Keycard's key UID, a
   Shell's master key id), when it is one of that seed's holders.
+- A module that knows an account and not its seed asks `{ "account": "<id or address>", "scope",
+  "generation"? }` instead, and the answer also names the `seed`. The manager looks the account up
+  among the accounts its signers last listed; one it doesn't know answers `code: unavailable`.
 - A locked wallet answers `code: locked`.
 - The current generation is the default. An earlier one still answers, so a module reads data
   sealed before the person changed the wallet's keys, and seals it again under the current key.

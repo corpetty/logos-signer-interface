@@ -29,12 +29,32 @@ pub struct DataKeyRequest {
     pub generation: Option<u32>,
 }
 
+/// The same key, for the wallet that holds an account: `{ account, scope, generation? }`, for a
+/// module that knows its accounts by address or id and not by seed.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountKeyRequest {
+    pub account: String,
+    pub scope: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u32>,
+}
+
 /// The key, 32 bytes as hex, and its generation.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DataKey {
     pub key: Secret,
     pub generation: u32,
+}
+
+/// A key asked for by account, with the wallet it belongs to.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountKey {
+    pub seed: String,
+    #[serde(flatten)]
+    pub key: DataKey,
 }
 
 /// What a signer registers from its add flow, while the holder's unlock key is at hand.
@@ -81,6 +101,11 @@ pub struct Wallet {
 }
 
 pub fn read_data_key(reply: &str) -> Result<DataKey> {
+    let v = parse_reply(reply)?;
+    serde_json::from_value(v).map_err(|e| invalid(format!("data_key reply: {e}")))
+}
+
+pub fn read_account_key(reply: &str) -> Result<AccountKey> {
     let v = parse_reply(reply)?;
     serde_json::from_value(v).map_err(|e| invalid(format!("data_key reply: {e}")))
 }
@@ -207,6 +232,12 @@ mod tests {
     fn replies_read_as_their_types() {
         let k = read_data_key(&format!(r#"{{"ok":true,"key":"{}","generation":1}}"#, "ab".repeat(32))).unwrap();
         assert_eq!(k.generation, 1);
+        let a = read_account_key(&format!(
+            r#"{{"ok":true,"key":"{}","generation":2,"seed":"s_1"}}"#,
+            "ab".repeat(32)
+        ))
+        .unwrap();
+        assert_eq!((a.seed.as_str(), a.key.generation), ("s_1", 2));
         assert_eq!(
             read_data_key(r#"{"ok":false,"code":"locked","error":"Card is locked"}"#)
                 .unwrap_err()
