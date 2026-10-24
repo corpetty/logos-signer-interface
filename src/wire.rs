@@ -11,6 +11,9 @@ pub enum Family {
     Bitcoin,
     /// Taproot key path, BIP86.
     BitcoinTaproot,
+    /// An Ed25519 key of its own, for an identity rather than a chain: a room member's authorship
+    /// key, for instance. The account's `address` is the public key, 32 bytes hex.
+    Ed25519,
 }
 
 impl Family {
@@ -93,12 +96,16 @@ pub enum Scheme {
     Ecdsa,
     /// BIP340 with the BIP86 key-path tweak.
     Bip86,
+    /// Ed25519 (RFC 8032) with the item's 32 bytes as the message. The digest is the manager's,
+    /// over a payload it parsed and rendered, so the signer still signs nothing it was not shown.
+    Ed25519,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HashItem {
-    /// Full path for a Bitcoin account; absent for an EVM account, which signs with its own key.
+    /// Full path for a Bitcoin account; absent for an EVM or Ed25519 account, which signs with
+    /// its own key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     pub scheme: Scheme,
@@ -234,7 +241,8 @@ pub struct Signature {
     pub signature: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_id: Option<u8>,
-    /// The key that signed: 33 bytes compressed, or 32 bytes x-only for BIP340, hex.
+    /// The key that signed: 33 bytes compressed, 32 bytes x-only for BIP340, or the 32-byte
+    /// Ed25519 public key, hex.
     pub pubkey: String,
 }
 

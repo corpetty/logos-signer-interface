@@ -126,6 +126,13 @@ pub fn verify_bip340(digest: &[u8; 32], sig: &[u8; 64], key: &schnorr::Verifying
         .map_err(|_| invalid("BIP340 signature does not verify"))
 }
 
+/// Ed25519, strictly: a non-canonical signature or a small-order key is refused.
+pub fn verify_ed25519(message: &[u8; 32], sig: &[u8; 64], key: &[u8; 32]) -> Result<()> {
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(key).map_err(|_| invalid("Ed25519 key"))?;
+    vk.verify_strict(message, &ed25519_dalek::Signature::from_bytes(sig))
+        .map_err(|_| invalid("Ed25519 signature does not verify"))
+}
+
 /// Does `sig` sign `item` for `account`, with the key the account's public material says it must?
 pub fn check(account: &Account, item: &HashItem, sig: &Signature) -> Result<()> {
     let digest = hex32(&item.digest)?;
@@ -167,6 +174,20 @@ pub fn check(account: &Account, item: &HashItem, sig: &Signature) -> Result<()> 
             }
             verify_bip340(&digest, &bytes, &output)
         }
+        (Family::Ed25519, Scheme::Ed25519) => {
+            if item.path.is_some() {
+                return Err(invalid("an Ed25519 account signs with its own key, at no path"));
+            }
+            let want = account
+                .address
+                .as_deref()
+                .ok_or_else(|| invalid("Ed25519 account without a public key"))?;
+            let key = hex32(want)?;
+            if !sig.pubkey.eq_ignore_ascii_case(want) {
+                return Err(invalid("answer names another key"));
+            }
+            verify_ed25519(&digest, &bytes, &key)
+        }
         (family, scheme) => Err(SignerError::new(
             ErrorCode::Unsupported,
             format!("{scheme:?} does not sign for a {family:?} account"),
@@ -207,6 +228,90 @@ mod tests {
         assert_eq!(hex::encode(key.as_affine().x()), BIP86_INTERNAL);
         let (_, out) = bip86_tweak(&key).unwrap();
         assert_eq!(hex::encode(out.to_bytes()), BIP86_OUTPUT);
+    }
+
+    /// RFC 8032 §7.1 test 1: the public key, and its signature over the empty message.
+    const RFC8032_PK: &str = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+    const RFC8032_SIG: &str = "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b";
+
+    #[test]
+    fn ed25519_verifies_strictly_against_the_rfc_8032_key() {
+        let key = hex32(RFC8032_PK).unwrap();
+        let sig = hex64(RFC8032_SIG).unwrap();
+        // The RFC signs the empty message; an item is 32 bytes, so the vector checks the curve
+        // arithmetic through the dalek API and the item path is checked below.
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(&key).unwrap();
+        assert!(vk
+            .verify_strict(b"", &ed25519_dalek::Signature::from_bytes(&sig))
+            .is_ok());
+        assert!(verify_ed25519(&[0u8; 32], &sig, &key).is_err(), "not over these bytes");
+    }
+
+    fn ed_account(pk: &str) -> Account {
+        Account {
+            id: "ed".into(),
+            family: Family::Ed25519,
+            chain: None,
+            path: None,
+            fingerprint: None,
+            address: Some(pk.into()),
+            xpub: None,
+            label: None,
+            available: true,
+        }
+    }
+
+    #[test]
+    fn an_ed25519_answer_is_checked_against_the_account_key() {
+        use ed25519_dalek::Signer as _;
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let other = ed25519_dalek::SigningKey::from_bytes(&[8u8; 32]);
+        let pk = hex::encode(sk.verifying_key().to_bytes());
+        let account = ed_account(&pk);
+        let digest = [0x11u8; 32];
+        let item = HashItem {
+            path: None,
+            scheme: Scheme::Ed25519,
+            digest: hex::encode(digest),
+        };
+        let answer = |key: &ed25519_dalek::SigningKey, over: &[u8; 32], named: &str| Signature {
+            item: 0,
+            signature: hex::encode(key.sign(over).to_bytes()),
+            recovery_id: None,
+            pubkey: named.into(),
+        };
+        assert!(check(&account, &item, &answer(&sk, &digest, &pk)).is_ok());
+        let other_pk = hex::encode(other.verifying_key().to_bytes());
+        assert!(
+            check(&account, &item, &answer(&other, &digest, &other_pk)).is_err(),
+            "another key"
+        );
+        assert!(
+            check(&account, &item, &answer(&other, &digest, &pk)).is_err(),
+            "another key, our name"
+        );
+        assert!(
+            check(&account, &item, &answer(&sk, &[0x22; 32], &pk)).is_err(),
+            "another digest"
+        );
+        let with_path = HashItem {
+            path: Some("m/0".into()),
+            ..item.clone()
+        };
+        assert!(
+            check(&account, &with_path, &answer(&sk, &digest, &pk)).is_err(),
+            "a path"
+        );
+        let wrong_scheme = HashItem {
+            scheme: Scheme::Evm,
+            ..item
+        };
+        assert_eq!(
+            check(&account, &wrong_scheme, &answer(&sk, &digest, &pk))
+                .unwrap_err()
+                .code,
+            ErrorCode::Unsupported
+        );
     }
 
     #[test]

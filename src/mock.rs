@@ -317,7 +317,12 @@ fn psbt_items(held: &Held, psbt: &str) -> Result<Vec<HashItem>> {
                     .map_err(|e| invalid(format!("input {i}: {e}")))?;
                 (Scheme::Bip86, path, h.to_byte_array())
             }
-            Family::Evm => return Err(SignerError::new(ErrorCode::Unsupported, "a PSBT for an EVM account")),
+            Family::Evm | Family::Ed25519 => {
+                return Err(SignerError::new(
+                    ErrorCode::Unsupported,
+                    "a PSBT for a non-Bitcoin account",
+                ))
+            }
         };
         items.push(HashItem {
             path: Some(path),

@@ -33,7 +33,7 @@ Every reply is `{ "ok": true, … }` or `{ "ok": false, "code": <code>, "error":
 |---|---|
 | `interface` | `"logos.signer/1"` |
 | `kind` | `keystore`, `keycard`, `keycard_shell`, `ledger`, `trezor`, `qr`, `mock` |
-| `families` | Any of `evm`, `bitcoin` (native segwit, BIP84), `bitcoin_taproot` (key path, BIP86) |
+| `families` | Any of `evm`, `bitcoin` (native segwit, BIP84), `bitcoin_taproot` (key path, BIP86), `ed25519` (an identity key) |
 | `requestKinds` | Any of `hash`, `evm_transaction`, `evm_message`, `evm_typed_data`, `btc_psbt` |
 | `showsRequest` | The device shows the request on its own screen |
 | `collects` | What the host collects before `sign`: `nothing`, `password` or `pin` |
@@ -45,7 +45,8 @@ Every reply is `{ "ok": true, … }` or `{ "ok": false, "code": <code>, "error":
   "xpub": "tpub…", "label": "Savings", "available": true }
 ```
 
-An EVM account carries `address` instead of `xpub`, and signs with its own key. A Bitcoin account
+An EVM account carries `address` instead of `xpub`, and signs with its own key. So does an
+`ed25519` account, whose `address` is its 32-byte public key in hex, with no `path` and no `xpub`. A Bitcoin account
 carries its account path, master fingerprint and account xpub, and signs below its path. A device
 module keeps listing an unplugged device's accounts with `"available": false`.
 
@@ -91,9 +92,10 @@ Schemes for `hash` items:
 | `evm` | `evm` | recoverable ECDSA, low S; the answer carries `recoveryId` |
 | `ecdsa` | `bitcoin` | ECDSA, low S, over a BIP143 sighash |
 | `bip86` | `bitcoin_taproot` | BIP340 by the key tweaked as BIP86 says, with no script tree, over a BIP341 sighash |
+| `ed25519` | `ed25519` | Ed25519 (RFC 8032), the item's 32 bytes as the message; verified strictly; the answer's `pubkey` is the account's key |
 
 A Bitcoin item's `path` must lie below the account's path with only unhardened levels; anything
-else is refused with `invalid`. An EVM item has no `path`.
+else is refused with `invalid`. An EVM or Ed25519 item has no `path`.
 
 ### `sign_status(job) → { ok, job, state, code?, error? }`
 

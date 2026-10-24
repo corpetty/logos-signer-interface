@@ -33,12 +33,18 @@ fn random_digest() -> String {
     hex::encode(b)
 }
 
-/// Hash items for an account: two for Bitcoin (a receive and a change key), one for EVM.
+/// Hash items for an account: two for Bitcoin (a receive and a change key), one for EVM and
+/// Ed25519.
 pub fn items_for(account: &Account) -> Vec<HashItem> {
     match account.family {
         Family::Evm => vec![HashItem {
             path: None,
             scheme: Scheme::Evm,
+            digest: random_digest(),
+        }],
+        Family::Ed25519 => vec![HashItem {
+            path: None,
+            scheme: Scheme::Ed25519,
             digest: random_digest(),
         }],
         family => {
@@ -344,6 +350,15 @@ pub fn accounts_are_public_and_match_info<S: Signer>(s: &mut S) {
                     "{}: EVM address {addr:?}",
                     a.id
                 );
+            }
+            Family::Ed25519 => {
+                let key = a.address.as_deref().unwrap_or_default();
+                assert!(
+                    key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()),
+                    "{}: an Ed25519 public key, 32 bytes hex",
+                    a.id
+                );
+                assert!(a.xpub.is_none() && a.path.is_none(), "{}: no xpub, no path", a.id);
             }
             _ => {
                 let xpub = a.xpub.as_deref().unwrap_or_default();

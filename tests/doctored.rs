@@ -11,6 +11,7 @@ fn items_for(account: &Account) -> Vec<HashItem> {
         Family::Evm => (Scheme::Evm, None),
         Family::Bitcoin => (Scheme::Ecdsa, Some(format!("{}/0/0", account.path.as_deref().unwrap()))),
         Family::BitcoinTaproot => (Scheme::Bip86, Some(format!("{}/0/1", account.path.as_deref().unwrap()))),
+        Family::Ed25519 => (Scheme::Ed25519, None),
     };
     vec![
         HashItem {
